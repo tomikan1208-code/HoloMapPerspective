@@ -24,7 +24,7 @@ max-display-size: 3
 # Choose a solid block (e.g. BLACK_CONCRETE) only for an opaque display.
 cube-material: AIR
 # Block layout for new cubes: solid, shell (one-block walls), or empty.
-cube-fill: solid
+cube-fill: shell
 # Inward maps project onto the far sides of the prism to preserve detail up close.
 cube-inward: true
 # Use invisible glow frames for new cubes to preserve colors in dim areas.

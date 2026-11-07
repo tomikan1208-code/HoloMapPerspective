@@ -315,7 +315,7 @@ public final class HoloMapPlugin extends JavaPlugin implements CommandExecutor, 
         Material material=Material.matchMaterial(getConfig().getString("cube-material","AIR"));
         if(material==null || (!material.isAir()&&(!material.isBlock()||!material.isSolid())))
             throw new IllegalArgumentException("Invalid cube-material: choose AIR or a solid block.");
-        CubeFill fillMode=CubeFill.parse(getConfig().getString("cube-fill","solid"));
+        CubeFill fillMode=CubeFill.parse(getConfig().getString("cube-fill","shell"));
         boolean inward=getConfig().getBoolean("cube-inward",true)&&(fillMode==CubeFill.EMPTY||isTransparent(material));
         boolean glow=getConfig().getBoolean("cube-glow",true);
         // Require empty volume + all six exterior face-neighbor layers.
@@ -376,7 +376,7 @@ public final class HoloMapPlugin extends JavaPlugin implements CommandExecutor, 
         }
         CubeDisplay cube=cubes.get(Integer.parseInt(args[1]));
         if(cube==null)throw new IllegalArgumentException("Cube not found: "+args[1]);
-        CubeFill next=CubeFill.parse(args.length==3?args[2]:getConfig().getString("cube-fill","solid"));
+        CubeFill next=CubeFill.parse(args.length==3?args[2]:getConfig().getString("cube-fill","shell"));
         CubeFill previous=cube.fillMode();
         if(next==previous) {
             sender.sendMessage("§aCube #"+cube.id+" already uses fill "+next.key()+".");

@@ -70,7 +70,7 @@ plugins/
 renderer-backend: gpu
 cube-inward: true
 cube-glow: true
-cube-fill: solid
+cube-fill: shell
 render-fps: 60
 animation-fps: 60
 gpu-python-command: python
@@ -83,7 +83,9 @@ max-prism-maps: 96
 
 `cube-inward` と `cube-glow` は新しく作る直方体に適用します。内向き投影には `cube-material: AIR` または `BARRIER` を使ってください。外向きの地図で作るには `cube-inward: false` を設定します。
 
-`cube-fill` は `cube-material` のブロックを置く範囲です。`solid` は全体、`shell` は6面の外周1ブロック、`empty` はブロックを置かず額縁だけを使います。幅・高さ・奥行きのうち1辺でも2以下の場合、`shell` では全ブロックが外周になります。
+`cube-fill` は `cube-material` のブロックを置く範囲です。初期値の `shell` は6面の外周1ブロック、`solid` は全体、`empty` は額縁だけを使います。幅・高さ・奥行きのうち1辺でも2以下の場合、`shell` では全ブロックが外周になります。
+
+内向きの場合、額縁は最外周のブロックと同じマスに固定されます。地図面は箱の外側の境界から約0.008ブロック内側にあり、箱の中央を向きます。
 
 設定を変更したら `/holomap reload` で読み込みます。既存の表示には `/holomap fill <id>` で設定を適用できます。個別に変えるときは `/holomap fill <id> empty` のように指定します。設置済みの額縁と地図IDを使ったまま、ブロックの配置だけを切り替えます。
 
