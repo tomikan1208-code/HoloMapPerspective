@@ -90,7 +90,8 @@ public final class Display {
         return new byte[width*128*height*128];
     }
     public void refresh(Player player) {
-        if(player.getWorld()!=world || player.getEyeLocation().distanceSquared(center())>
+        Location eye=player.getEyeLocation();
+        if(player.getWorld()!=world || eye.distanceSquared(center())>
                 Math.pow(plugin.getConfig().getDouble("view-distance",16),2))return;
         if(plugin.models().isGpu()&&plugin.nativeMaps()!=null) {
             if(!isStreaming(player.getUniqueId())) {
@@ -100,12 +101,22 @@ public final class Display {
                 GpuEngine.Delivery delivery=plugin.nativeMaps().capture(player,tiles);
                 if(delivery!=null)plugin.gpu().bindDelivery(id,player.getUniqueId(),model,delivery);
             }
-            if(isStreaming(player.getUniqueId())){frameFor(player);return;}
+            if(isStreaming(player.getUniqueId())){sampleEye(player,eye,false);return;}
         }
         for(int id:mapIds) {
             MapView map=Bukkit.getMap(id);
             if(map!=null)player.sendMap(map);
         }
+    }
+    public void sampleEye(Player player,Location eye,boolean teleport) {
+        if(eye.getWorld()!=world||!isStreaming(player.getUniqueId()))return;
+        Vector delta=eye.toVector().subtract(center().toVector());
+        double distance=plugin.getConfig().getDouble("view-distance",16);
+        double z=delta.dot(normal());
+        GpuEngine.Request request=new GpuEngine.Request("flat",width*128,height*128,delta.dot(right()),delta.getY(),z,
+                width,height,plugin.getConfig().getDouble("model-scale",.82),plugin.getConfig().getDouble("model-depth",.75),
+                null,z>1e-4&&delta.lengthSquared()<=distance*distance);
+        plugin.gpu().sampleScene(id,player.getUniqueId(),model,plugin.ticks(),List.of(request),player.getPing(),teleport);
     }
     public boolean isStreaming(UUID player){return plugin.gpu().isStreaming(id,player,model);}
     public void suppressVanillaUpdate(MapView map,Player player){plugin.nativeMaps().suppressVanillaUpdate(map,player);}

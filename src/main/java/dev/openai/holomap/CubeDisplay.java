@@ -16,6 +16,7 @@ public final class CubeDisplay {
     public final int id,baseX,baseY,baseZ,width,height,depth;
     public final World world;
     public final String blockMaterial;
+    public final boolean inward;
     public String model;
     private final HoloMapPlugin plugin;
     public final EnumMap<CubeGeometry.Face,List<Integer>> mapIds;
@@ -35,13 +36,13 @@ public final class CubeDisplay {
     }
 
     public CubeDisplay(HoloMapPlugin plugin,int id,World world,int baseX,int baseY,int baseZ,
-                       int width,int height,int depth,String model,String blockMaterial,
+                       int width,int height,int depth,String model,String blockMaterial,boolean inward,
                        Map<CubeGeometry.Face,List<Integer>> maps,
                        Map<CubeGeometry.Face,List<UUID>> frames) {
         this.plugin=plugin;this.id=id;this.world=world;
         this.baseX=baseX;this.baseY=baseY;this.baseZ=baseZ;
         this.width=width;this.height=height;this.depth=depth;
-        this.model=model;this.blockMaterial=blockMaterial;
+        this.model=model;this.blockMaterial=blockMaterial;this.inward=inward;
         mapIds=new EnumMap<>(CubeGeometry.Face.class);
         frameIds=new EnumMap<>(CubeGeometry.Face.class);
         for(CubeGeometry.Face face:CubeGeometry.Face.values()) {
@@ -51,10 +52,12 @@ public final class CubeDisplay {
     }
 
     public Location faceCenter(CubeGeometry.Face f) {
+        CubeGeometry.Face basis=f.screenBasis(inward);
+        double offset=f.screenDepth(width,height,depth,inward);
         return new Location(world,
-                baseX+width*.5+f.nx()*(width*.5+CubeGeometry.MAP_OFFSET),
-                baseY+height*.5+f.ny()*(height*.5+CubeGeometry.MAP_OFFSET),
-                baseZ+depth*.5+f.nz()*(depth*.5+CubeGeometry.MAP_OFFSET));
+                baseX+width*.5+basis.nx()*offset,
+                baseY+height*.5+basis.ny()*offset,
+                baseZ+depth*.5+basis.nz()*offset);
     }
 
     public void installRenderers() {
@@ -84,7 +87,8 @@ public final class CubeDisplay {
         Location eye=player.getEyeLocation();
         Location center=faceCenter(face);
         double ex=eye.getX()-center.getX(),ey=eye.getY()-center.getY(),ez=eye.getZ()-center.getZ();
-        double[] eyeLocal=face.project(ex,ey,ez);
+        CubeGeometry.Face basis=face.screenBasis(inward);
+        double[] eyeLocal=basis.project(ex,ey,ez);
         double maxDistance=plugin.getConfig().getDouble("view-distance",16);
         // Do not attempt perspective projection from behind the display plane.
         if(eye.getWorld()!=world || eye.distanceSquared(center)>maxDistance*maxDistance || eyeLocal[2]<=.08) {
@@ -97,20 +101,19 @@ public final class CubeDisplay {
         // Cache each mesh's six oriented geometries, not one giant rendered bitmap.
         OrientedFrame oriented=orientedMeshes.get(face);
         if(oriented==null||oriented.index()!=frameIndex){
-            oriented=new OrientedFrame(frameIndex,face.orient(frames.get(frameIndex)));
+            oriented=new OrientedFrame(frameIndex,basis.orient(frames.get(frameIndex)));
             orientedMeshes.put(face,oriented);
         }
         Mesh mesh=oriented.mesh();
         int screenW=face.tileWidth(width,height,depth);
         int screenH=face.tileHeight(width,height,depth);
-        int thickness=face.thickness(width,height,depth);
         // The rasterizer scales by face height internally. Choose a world-space
         // scale tied to the smallest prism dimension, not the face orientation.
         double scale=plugin.getConfig().getDouble("model-scale",.82)
                 * Math.min(width,Math.min(height,depth))/(double)screenH;
         int[] rgb=PerspectiveRaster.render(mesh,screenW*128,screenH*128,
                 eyeLocal[0],eyeLocal[1],eyeLocal[2],screenW,screenH,
-                scale,thickness*.5+CubeGeometry.MAP_OFFSET,face);
+                scale,face.screenDepth(width,height,depth,inward),basis);
         entry.pixels=new byte[rgb.length];
         for(int i=0;i<rgb.length;i++)entry.pixels[i]=plugin.palette(rgb[i]);
         return entry.pixels;
@@ -120,25 +123,31 @@ public final class CubeDisplay {
         long tick=plugin.ticks();
         if(view.scene==null||view.tick!=tick) {
             // Capture once on the server thread; tiles cannot switch images mid-refresh.
-            Location eye=player.getEyeLocation();
-            double distance=plugin.getConfig().getDouble("view-distance",16);
-            List<GpuEngine.Request> requests=new ArrayList<>(6);
-            for(CubeGeometry.Face face:CubeGeometry.Face.values()) {
-                Location center=faceCenter(face);
-                double[] local=face.project(eye.getX()-center.getX(),eye.getY()-center.getY(),eye.getZ()-center.getZ());
-                int sw=face.tileWidth(width,height,depth),sh=face.tileHeight(width,height,depth);
-                double margin=plugin.getConfig().getDouble("model-scale",.82);
-                Models.Asset asset=plugin.models().asset(model);
-                double size=asset==null?margin*Math.min(width,Math.min(height,depth)):asset.fittedSize(width,height,depth,margin);
-                double scale=size/sh;
-                boolean visible=eye.getWorld()==world&&eye.distanceSquared(center)<=distance*distance&&local[2]>1e-4;
-                requests.add(new GpuEngine.Request(face.name(),sw*128,sh*128,local[0],local[1],local[2],sw,sh,scale,
-                        face.thickness(width,height,depth)*.5+CubeGeometry.MAP_OFFSET,face,visible));
-            }
-            view.scene=plugin.gpu().renderScene(id,player.getUniqueId(),model,tick,requests);
+            view.scene=plugin.gpu().renderScene(id,player.getUniqueId(),model,tick,requestsFor(player.getEyeLocation()));
             view.tick=tick;
         }
         return view.scene.pixels(requestedFace.name());
+    }
+    private List<GpuEngine.Request> requestsFor(Location eye) {
+        double distance=plugin.getConfig().getDouble("view-distance",16);
+        double margin=plugin.getConfig().getDouble("model-scale",.82);
+        Models.Asset asset=plugin.models().asset(model);
+        double size=asset==null?margin*Math.min(width,Math.min(height,depth)):asset.fittedSize(width,height,depth,margin);
+        List<GpuEngine.Request> requests=new ArrayList<>(6);
+        for(CubeGeometry.Face face:CubeGeometry.Face.values()) {
+            Location center=faceCenter(face);
+            CubeGeometry.Face basis=face.screenBasis(inward);
+            double[] local=basis.project(eye.getX()-center.getX(),eye.getY()-center.getY(),eye.getZ()-center.getZ());
+            int sw=face.tileWidth(width,height,depth),sh=face.tileHeight(width,height,depth);
+            boolean visible=eye.getWorld()==world&&eye.distanceSquared(center)<=distance*distance&&local[2]>1e-4;
+            requests.add(new GpuEngine.Request(face.name(),sw*128,sh*128,local[0],local[1],local[2],sw,sh,size/sh,
+                    face.screenDepth(width,height,depth,inward),basis,visible));
+        }
+        return requests;
+    }
+    public void sampleEye(Player player,Location eye,boolean teleport) {
+        if(eye.getWorld()!=world||!isStreaming(player.getUniqueId()))return;
+        plugin.gpu().sampleScene(id,player.getUniqueId(),model,plugin.ticks(),requestsFor(eye),player.getPing(),teleport);
     }
     private byte[] blank(CubeGeometry.Face face){
         return new byte[face.tileWidth(width,height,depth)*128
@@ -146,10 +155,11 @@ public final class CubeDisplay {
     }
     public void refresh(Player player) {
         if(player.getWorld()!=world)return;
+        Location eye=player.getEyeLocation();
         double distance=plugin.getConfig().getDouble("view-distance",16);
         boolean nearby=false;
         for(CubeGeometry.Face face:CubeGeometry.Face.values())
-            if(player.getEyeLocation().distanceSquared(faceCenter(face))<=distance*distance){nearby=true;break;}
+            if(eye.distanceSquared(faceCenter(face))<=distance*distance){nearby=true;break;}
         if(!nearby)return;
         if(plugin.models().isGpu()&&plugin.nativeMaps()!=null) {
             if(!isStreaming(player.getUniqueId())) {
@@ -162,10 +172,10 @@ public final class CubeDisplay {
                 GpuEngine.Delivery delivery=plugin.nativeMaps().capture(player,tiles);
                 if(delivery!=null)plugin.gpu().bindDelivery(id,player.getUniqueId(),model,delivery);
             }
-            if(isStreaming(player.getUniqueId())){gpuFrameFor(player,CubeGeometry.Face.SOUTH);return;}
+            if(isStreaming(player.getUniqueId())){sampleEye(player,eye,false);return;}
         }
         for(CubeGeometry.Face face:CubeGeometry.Face.values()) {
-            if(player.getEyeLocation().distanceSquared(faceCenter(face))>distance*distance)continue;
+            if(eye.distanceSquared(faceCenter(face))>distance*distance)continue;
             for(int id:mapIds.get(face)) {
                 MapView view=Bukkit.getMap(id);
                 if(view!=null)player.sendMap(view);
@@ -195,6 +205,7 @@ public final class CubeDisplay {
         out.set("world",world.getName());out.set("x",baseX);out.set("y",baseY);out.set("z",baseZ);
         out.set("width",width);out.set("height",height);out.set("depth",depth);
         out.set("model",model);out.set("block-material",blockMaterial);
+        out.set("inward",inward);
         for(CubeGeometry.Face face:CubeGeometry.Face.values()) {
             out.set("maps."+face.name(),mapIds.get(face));
             out.set("frames."+face.name(),frameIds.get(face).stream().map(UUID::toString).toList());

@@ -116,6 +116,14 @@ def run(arguments):
         for sign in (-1, 1):
             cases.append((dimensions, np.array((0., sign*6., 0.)), "pole"))
     results = []
+    if arguments.near:
+        cases = []
+        for clearance in (.15,.3,.6):
+            for angle in range(0,360,15):
+                radians=math.radians(angle)
+                x,z=math.sin(radians),math.cos(radians)
+                radius=(1+clearance)/max(abs(x),abs(z))
+                cases.append(((2,4,2),np.array((x*radius,.35,z*radius)),angle))
     for dimensions, eye, angle in cases:
         dimensions = np.array(dimensions)
         model_size = .82 * min(dimensions)
@@ -132,16 +140,25 @@ def run(arguments):
         mesh_vao.render(moderngl.TRIANGLES)
         expected = np.frombuffer(target.read(components=4, alignment=1), dtype=np.uint8).reshape(size, size, 4).copy()
         maps = []
+        map_pixels = 0
         for name, (normal, horizontal, vertical) in FACES.items():
             n, r, u = np.array(normal), np.array(horizontal), np.array(vertical)
-            bw, bh, depth = int(abs(r)@dimensions), int(abs(u)@dimensions), float(abs(n)@dimensions/2+OFFSET)
+            sign = -1 if arguments.inward else 1
+            depth = float(sign*(abs(n)@dimensions)/2+OFFSET)
+            if arguments.inward:
+                if n[1]: u = -u
+                else: r = -r
+                n = -n
+            bw, bh = int(abs(r)@dimensions), int(abs(u)@dimensions)
             center = n*depth
             local = np.array((r@(eye-center), u@(eye-center), n@(eye-center)))
             if local[2] <= 1e-4:
                 continue
             values = [*local, bw, bh, model_size/bh, depth, *middle, normalization, *r, *u, *n]
             rgba = renderer.render(str(arguments.mesh), bw*128, bh*128, values)
-            texture = context.texture((bw*128, bh*128), 4, np.frombuffer(rgba, dtype=np.uint8).reshape(bh*128, bw*128, 4)[::-1].tobytes())
+            pixels = np.frombuffer(rgba, dtype=np.uint8).reshape(bh*128, bw*128, 4)
+            map_pixels += int(np.count_nonzero(pixels[:,:,3]>127))
+            texture = context.texture((bw*128, bh*128), 4, pixels[::-1].tobytes())
             texture.filter = (moderngl.NEAREST, moderngl.NEAREST)
             points = []
             for x, y in ((0, 0), (1, 0), (1, 1), (0, 0), (1, 1), (0, 1)):
@@ -169,9 +186,12 @@ def run(arguments):
         color_errors = int(np.count_nonzero(stable & (np.max(np.abs(actual[:, :, :3].astype(int)-expected[:, :, :3].astype(int)), axis=2) > 3)))
         center_error = float(np.linalg.norm(np.mean(np.argwhere(expected_mask), axis=0)-np.mean(np.argwhere(actual_mask), axis=0)))
         results.append(dict(dimensions=dimensions.tolist(), angle=angle, elevation=float(eye[1]), holes=holes,
-                            color_errors=color_errors, stable_pixels=int(stable.sum()), center_error=center_error))
+                            color_errors=color_errors, stable_pixels=int(stable.sum()), center_error=center_error,
+                            map_pixels=map_pixels))
     failures = [row for row in results if row["holes"] > 0 or row["color_errors"] > max(2, row["stable_pixels"]*.002) or row["center_error"] > .7]
     report = dict(result="PASS" if not failures else "FAIL", gpu=renderer.name, cases=len(results),
+                  minimum_map_pixels=min(row["map_pixels"] for row in results),
+                  median_map_pixels=int(np.median([row["map_pixels"] for row in results])),
                   worst_interior_holes=max(row["holes"] for row in results),
                   worst_color_errors=max(row["color_errors"] for row in results),
                   worst_center_error=round(max(row["center_error"] for row in results), 4), failures=failures[:12])
@@ -188,4 +208,6 @@ if __name__ == "__main__":
     parser.add_argument("--mesh", required=True, type=Path)
     parser.add_argument("--report", type=Path)
     parser.add_argument("--quick", action="store_true")
+    parser.add_argument("--inward", action="store_true")
+    parser.add_argument("--near", action="store_true")
     raise SystemExit(run(parser.parse_args()))

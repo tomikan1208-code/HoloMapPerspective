@@ -36,44 +36,56 @@ def prepare(source, output):
     model_name, english_name, comment, english_comment = [reader.text() for _ in range(4)]
     vertex_count = reader.unpack("i")[0]
     vertices = np.empty((vertex_count, 3), dtype="<f4")
+    normals = np.empty_like(vertices)
     uv = np.empty((vertex_count, 2), dtype="<f4")
+    edge_scale = np.empty(vertex_count, dtype="<f4")
     for index in range(vertex_count):
         vertices[index] = reader.unpack("3f")
-        reader.unpack("3f")  # normals; flat world-space normals are calculated by the GPU
+        normals[index] = reader.unpack("3f")
         uv[index] = reader.unpack("2f")
         reader.file.read(reader.flags[1]*16)
         deformation = reader.unpack("B")[0]
         bone_size = reader.flags[5]
         sizes = {0: bone_size, 1: bone_size*2+4, 2: bone_size*4+16,
                  3: bone_size*2+40, 4: bone_size*4+16}
-        reader.file.read(sizes[deformation]+4)
+        reader.file.read(sizes[deformation])
+        edge_scale[index], = reader.unpack("f")
     index_count = reader.unpack("i")[0]
     indices = np.frombuffer(reader.file.read(index_count*reader.flags[2]),
                             dtype={1: "u1", 2: "<u2", 4: "<u4"}[reader.flags[2]])
     textures = [reader.text() for _ in range(reader.unpack("i")[0])]
     materials = []
+    material_start = 0
     for _ in range(reader.unpack("i")[0]):
         name, english = reader.text(), reader.text()
         diffuse = reader.unpack("4f")
-        reader.file.read(12+4+12+1+16+4)
+        reader.file.read(12+4+12)  # Specular, shininess and ambient.
+        flags, = reader.unpack("B")
+        edge_color = reader.unpack("4f")
+        edge_size, = reader.unpack("f")
         texture = reader.index(reader.flags[3])
-        reader.index(reader.flags[3])
-        reader.file.read(1)
+        sphere = reader.index(reader.flags[3])
+        sphere_mode, = reader.unpack("B")
         shared = reader.unpack("B")[0]
-        reader.file.read(1 if shared else reader.flags[3])
+        toon = reader.unpack("B")[0] if shared else reader.index(reader.flags[3])
         reader.text()
         faces = reader.unpack("i")[0]
-        materials.append(dict(name=name, diffuse=diffuse, texture=texture, vertices=faces))
-    if sum(material["vertices"] for material in materials) != index_count:
+        if faces<0 or faces%3:
+            raise ValueError("Invalid PMX material triangle count")
+        materials.append(dict(name=name, diffuse=diffuse, texture=texture, vertices=faces, first=material_start,
+                              toon=-1 if shared else toon, sphere=sphere if sphere_mode in (1,2) else -1,
+                              sphere_mode=sphere_mode, two_sided=bool(flags&1),
+                              edge_color=edge_color, edge_size=edge_size if flags&16 else 0))
+        material_start += faces
+    if material_start != index_count:
         raise ValueError("PMX material ranges do not cover the mesh")
     output.mkdir(parents=True, exist_ok=True)
     texture_directory = output/"textures"
     texture_directory.mkdir(exist_ok=True)
     copied = {}
-    for material in materials:
-        number = material["texture"]
-        if number < 0 or number in copied:
-            continue
+    visible_materials = [material for material in materials if material["diffuse"][3] > 0 and material["vertices"]]
+    used_textures = {material[role] for material in visible_materials for role in ("texture", "toon", "sphere")}
+    for number in sorted(used_textures - {-1}):
         name = textures[number].replace("\\", "/")
         image_path = (source.parent/name).resolve()
         if not image_path.is_file():
@@ -85,27 +97,41 @@ def prepare(source, output):
     # Match Blender's MMD export convention: metres, Y-up, Z toward the viewer.
     vertices *= .08
     vertices[:, 2] *= -1
+    normals[:, 2] *= -1
     uv[:, 1] = 1-uv[:, 1]
-    bounds = [*vertices.min(axis=0), *vertices.max(axis=0)]
-    dtype = np.dtype([("position", "<f4", (3,)), ("rgba", "<u4"), ("uv", "<f4", (2,))])
-    manifest = {"version": 1, "segments": []}
-    cursor = 0
+    visible_vertex_count = sum(material["vertices"] for material in visible_materials)
+    if not visible_vertex_count:
+        raise ValueError("PMX has no visible material")
+    rendered_indices = np.concatenate([indices[m["first"]:m["first"]+m["vertices"]] for m in visible_materials])
+    used_vertices = vertices[rendered_indices]
+    bounds = [*used_vertices.min(axis=0), *used_vertices.max(axis=0)]
+    dtype = np.dtype([("position", "<f4", (3,)), ("rgba", "<u4"), ("uv", "<f4", (2,)),
+                      ("normal", "<f4", (3,)), ("edge", "<f4")])
+    manifest = {"version": 2, "segments": []}
+    written = 0
     with (output/"model.hmesh").open("wb") as binary:
-        binary.write(b"HMAPTEX1"+struct.pack("<i6f", index_count//3, *bounds))
-        for material in materials:
+        binary.write(b"HMAPTEX2"+struct.pack("<i6f", visible_vertex_count//3, *bounds))
+        for material in visible_materials:
             count = material["vertices"]
-            selected = indices[cursor:cursor+count].reshape(-1, 3)[:, [0, 2, 1]].reshape(-1)
+            start = material["first"]
+            face_indices = indices[start:start+count]
+            selected = face_indices.reshape(-1, 3)[:, [0, 2, 1]].reshape(-1)
             rgba = np.clip(np.array(material["diffuse"])*255, 0, 255).round().astype(int)
             packed = int(rgba[3]<<24 | rgba[0]<<16 | rgba[1]<<8 | rgba[2])
             values = np.empty(count, dtype=dtype)
             values["position"], values["uv"], values["rgba"] = vertices[selected], uv[selected], packed
+            values["normal"], values["edge"] = normals[selected], edge_scale[selected]
             binary.write(values.tobytes())
-            manifest["segments"].append(dict(first=cursor, count=count, material=material["name"], texture=copied.get(material["texture"])))
-            cursor += count
+            manifest["segments"].append(dict(
+                first=written, count=count, material=material["name"], texture=copied.get(material["texture"]),
+                toon=copied.get(material["toon"]), sphere=copied.get(material["sphere"]),
+                sphere_mode=material["sphere_mode"], two_sided=material["two_sided"],
+                blend=material["diffuse"][3]<1, edge_color=material["edge_color"], edge_size=material["edge_size"]))
+            written += count
     (output/"model.hmesh.materials.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     report = dict(source=str(source), source_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
-                  name=model_name, triangles=index_count//3, vertices=vertex_count,
-                  materials=len(materials), textures=len(copied), bounds=[float(value) for value in bounds],
+                  name=model_name, triangles=visible_vertex_count//3, vertices=vertex_count,
+                  materials=len(visible_materials), textures=len(copied), bounds=[float(value) for value in bounds],
                   output=str(output/"model.hmesh"))
     (output/"preparation.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(report, ensure_ascii=True, indent=2))

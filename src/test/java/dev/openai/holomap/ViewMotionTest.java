@@ -4,6 +4,11 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
 class ViewMotionTest {
+    @Test void suddenReversalUsesAtMostTwelveMillisecondsOfLead() {
+        assertTrue(ViewMotion.sharpTurn(-.6,0,0,.6,0,0));
+        assertFalse(ViewMotion.sharpTurn(.6,.05,0,.6,0,0));
+        assertEquals(.24,ViewMotion.fraction(0,50_000_000L,85_000_000L,.36,true),1e-6);
+    }
     @Test void continuousMotionBetweenTicksAndStopsPredictingAfterOneTick() {
         long previous=1_000_000_000L,latest=previous+50_000_000L;
         double fraction=ViewMotion.fraction(previous,latest,latest+25_000_000L,.04);

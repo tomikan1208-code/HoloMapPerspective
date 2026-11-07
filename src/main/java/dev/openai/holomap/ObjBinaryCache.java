@@ -92,11 +92,15 @@ public final class ObjBinaryCache {
             if(header.hasRemaining())throw new IOException("Truncated mesh header: "+cache);
             header.flip();
             byte[] signature=new byte[8];header.get(signature);
-            boolean textured=Arrays.equals(signature,"HMAPTEX1".getBytes(java.nio.charset.StandardCharsets.US_ASCII));
-            if(!textured&&!Arrays.equals(signature,MAGIC))throw new IOException("Bad mesh cache version: "+cache);
+            int triangleBytes=switch(new String(signature,java.nio.charset.StandardCharsets.US_ASCII)) {
+                case "HMAPGPU1" -> 48;
+                case "HMAPTEX1" -> 72;
+                case "HMAPTEX2" -> 120;
+                default -> throw new IOException("Bad mesh cache version: "+cache);
+            };
             int count=header.getInt(); if(count<=0)throw new IOException("Empty mesh cache: "+cache);
             float[] bounds=new float[6]; for(int i=0;i<6;i++)bounds[i]=header.getFloat();
-            if(fc.size()!=HEADER+(textured?72L:48L)*count)throw new IOException("Incomplete mesh cache: "+cache);
+            if(fc.size()!=HEADER+(long)triangleBytes*count)throw new IOException("Incomplete mesh cache: "+cache);
             return new Frame(cache,count,bounds);
         }
     }

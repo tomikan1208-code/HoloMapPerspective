@@ -11,7 +11,9 @@ import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.util.RayTraceResult;
 import org.bukkit.util.Vector;
 import org.bukkit.event.*;
+import org.bukkit.event.player.PlayerMoveEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.event.player.PlayerTeleportEvent;
 import java.io.*;
 import java.util.*;
 
@@ -130,7 +132,7 @@ public final class HoloMapPlugin extends JavaPlugin implements CommandExecutor, 
             String model=c.getString("model","demo");
             models.load(model);
             CubeDisplay cube=new CubeDisplay(this,id,world,c.getInt("x"),c.getInt("y"),c.getInt("z"),
-                    width,height,depth,model,c.getString("block-material","BLACK_CONCRETE"),maps,frames);
+                    width,height,depth,model,c.getString("block-material","BLACK_CONCRETE"),c.getBoolean("inward"),maps,frames);
             cubes.put(id,cube);cube.installRenderers();nextId=Math.max(nextId,id+1);
         }catch(Exception ex){getLogger().warning("Could not load cube "+key+": "+ex.getMessage());}
     }
@@ -147,6 +149,26 @@ public final class HoloMapPlugin extends JavaPlugin implements CommandExecutor, 
         for(Display d:displays.values())d.removePlayer(id);
         for(CubeDisplay c:cubes.values())c.removePlayer(id);
         gpu.forgetPlayer(id);
+    }
+    @EventHandler(priority=EventPriority.MONITOR,ignoreCancelled=true)
+    public void move(PlayerMoveEvent event) {
+        if(event instanceof PlayerTeleportEvent||!event.hasChangedPosition())return;
+        sampleMovement(event,false);
+    }
+    @EventHandler(priority=EventPriority.MONITOR,ignoreCancelled=true)
+    public void teleport(PlayerTeleportEvent event) {
+        if(event.getTo().getWorld()!=event.getFrom().getWorld()) {
+            gpu.forgetPlayer(event.getPlayer().getUniqueId());
+            return;
+        }
+        sampleMovement(event,true);
+    }
+    private void sampleMovement(PlayerMoveEvent event,boolean teleport) {
+        if(nativeMaps==null||!models.isGpu())return;
+        Player player=event.getPlayer();
+        Location eye=event.getTo().clone().add(0,player.getEyeHeight(),0);
+        for(Display display:displays.values())display.sampleEye(player,eye,teleport);
+        for(CubeDisplay cube:cubes.values())cube.sampleEye(player,eye,teleport);
     }
     @Override public boolean onCommand(CommandSender sender,Command command,String label,String[] args) {
         if(!sender.hasPermission("holomap.admin")){sender.sendMessage("§cNo permission.");return true;}
@@ -275,6 +297,9 @@ public final class HoloMapPlugin extends JavaPlugin implements CommandExecutor, 
         Material material=Material.matchMaterial(getConfig().getString("cube-material","AIR"));
         if(material==null || (!material.isAir()&&(!material.isBlock()||!material.isSolid())))
             throw new IllegalArgumentException("Invalid cube-material: choose AIR or a solid block.");
+        boolean transparent=material.isAir()||material==Material.BARRIER||!material.isOccluding();
+        boolean inward=transparent&&getConfig().getBoolean("cube-inward",true);
+        boolean glow=getConfig().getBoolean("cube-glow",true);
         // Require empty volume + all six exterior face-neighbor layers.
         for(int x=-1;x<=width;x++)for(int y=-1;y<=height;y++)for(int z=-1;z<=depth;z++) {
             boolean core=x>=0&&x<width&&y>=0&&y<height&&z>=0&&z<depth;
@@ -296,21 +321,21 @@ public final class HoloMapPlugin extends JavaPlugin implements CommandExecutor, 
                 b.setType(material,false);blocks.add(b);
             }
             for(CubeGeometry.Face face:CubeGeometry.Face.values()) {
-                BlockFace normal=BlockFace.valueOf(face.name());
+                BlockFace normal=BlockFace.valueOf(face.screenBasis(inward).name());
                 int fw=face.tileWidth(width,height,depth),fh=face.tileHeight(width,height,depth);
                 for(int y=0;y<fh;y++)for(int x=0;x<fw;x++) {
-                    int[] offset=face.support(width,height,depth,x,y);
+                    int[] offset=face.support(width,height,depth,x,y,inward);
                     Block support=world.getBlockAt(bx+offset[0],by+offset[1],bz+offset[2]);
-                    Block air=support.getRelative(normal);
+                    Block anchor=inward?support:support.getRelative(normal);
                     MapView map=Bukkit.createMap(world);
                     maps.get(face).add(map.getId());
-                    ItemFrame frame=spawnFrame(air,normal,map);
+                    ItemFrame frame=spawnFrame(anchor,normal,map,glow);
                     createdFrames.add(frame.getUniqueId());
                     frames.get(face).add(frame.getUniqueId());
                 }
             }
             CubeDisplay cube=new CubeDisplay(this,id,world,bx,by,bz,width,height,depth,
-                    name,material.name(),maps,frames);
+                    name,material.name(),inward,maps,frames);
             cubes.put(id,cube);cube.installRenderers();saveDisplays();
             sender.sendMessage("§aHoloMap prism #"+id+" created ("+width+"x"+height+"x"+depth+", "+cube.mapCount()+" maps). Walk around all six faces.");
         }catch(Exception ex){
@@ -329,7 +354,11 @@ public final class HoloMapPlugin extends JavaPlugin implements CommandExecutor, 
                     "An existing hanging entity obstructs "+block.getX()+","+block.getY()+","+block.getZ());
     }
     private ItemFrame spawnFrame(Block air,BlockFace normal,MapView map) {
-        return air.getWorld().spawn(air.getLocation().add(.5,.5,.5),ItemFrame.class,frame->{
+        return spawnFrame(air,normal,map,false);
+    }
+    private ItemFrame spawnFrame(Block anchor,BlockFace normal,MapView map,boolean glow) {
+        Class<? extends ItemFrame> type=glow?GlowItemFrame.class:ItemFrame.class;
+        return anchor.getWorld().spawn(anchor.getLocation().add(.5,.5,.5),type,frame->{
             frame.setFixed(true);
             if(!frame.setFacingDirection(normal,true))throw new IllegalStateException("Could not orient item frame.");
             frame.setRotation(Rotation.NONE);
@@ -350,9 +379,10 @@ public final class HoloMapPlugin extends JavaPlugin implements CommandExecutor, 
             for(CubeGeometry.Face face:CubeGeometry.Face.values())
                 for(int y=0;y<face.tileHeight(cube.width,cube.height,cube.depth);y++)
                 for(int x=0;x<face.tileWidth(cube.width,cube.height,cube.depth);x++){
-                int[] p=face.support(cube.width,cube.height,cube.depth,x,y);
-                cube.world.getChunkAt((cube.baseX+p[0]+face.nx())>>4,
-                        (cube.baseZ+p[2]+face.nz())>>4).getEntities();
+                int[] p=face.support(cube.width,cube.height,cube.depth,x,y,cube.inward);
+                int outside=cube.inward?0:1;
+                cube.world.getChunkAt((cube.baseX+p[0]+outside*face.nx())>>4,
+                        (cube.baseZ+p[2]+outside*face.nz())>>4).getEntities();
             }
             for(UUID uuid:cube.allFrames()){
                 Entity entity=Bukkit.getEntity(uuid);

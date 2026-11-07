@@ -4,6 +4,8 @@ import dev.openai.holomap.*;
 import dev.openai.holomap.CubeGeometry.Face;
 import org.bukkit.*;
 import org.bukkit.entity.Player;
+import org.bukkit.entity.GlowItemFrame;
+import org.bukkit.block.BlockFace;
 import org.bukkit.map.*;
 import org.bukkit.plugin.java.JavaPlugin;
 import java.lang.reflect.*;
@@ -15,7 +17,7 @@ import java.util.concurrent.atomic.AtomicLong;
 public final class GpuSeamVerifier extends JavaPlugin {
     private HoloMapPlugin plugin;
     private World world;
-    private CubeDisplay small,large;
+    private CubeDisplay small,large,inward;
     private Viewer viewer;
     private int state,ticks,assertions,caseIndex,readyAt;
     private long requestedTick,lastSceneTick=-1,benchmarkStart;
@@ -38,10 +40,11 @@ public final class GpuSeamVerifier extends JavaPlugin {
         Bukkit.getScheduler().runTaskLater(this,()->{
             try {
                 check(plugin.models().isGpu(),"hardware GPU mode enabled");
+                plugin.getConfig().set("cube-inward",false);
                 verifyVanillaSuppression();
                 @SuppressWarnings("unchecked") Map<Integer,CubeDisplay> old=(Map<Integer,CubeDisplay>)field(plugin,"cubes");
                 for(CubeDisplay prior:new ArrayList<>(old.values()))
-                    if(prior.world==world&&prior.baseY==100&&Set.of(0,8,16,24).contains(prior.baseX)&&prior.baseZ==0)
+                    if(prior.world==world&&prior.baseY==100&&Set.of(0,8,16,24,32).contains(prior.baseX)&&prior.baseZ==0)
                         Bukkit.dispatchCommand(Bukkit.getConsoleSender(),"holomap remove "+prior.id);
                 small=create("0 100 0 1 2 1 demo");
                 large=create("8 100 0 4 4 4 demo");
@@ -170,6 +173,44 @@ public final class GpuSeamVerifier extends JavaPlugin {
                         getConfig().set("three_displays_bundles_per_second."+entry.getKey().model,fps);
                         getLogger().info("Three-display stream "+entry.getKey().model+": "+fps+" bundles/s");
                     }
+                    for(CubeDisplay cube:concurrentStreams.keySet())plugin.gpu().invalidate(cube.id);
+                    plugin.getConfig().set("cube-inward",true);
+                    plugin.getConfig().set("cube-glow",true);
+                    plugin.getConfig().set("cube-material","BARRIER");
+                    inward=create("32 100 0 2 4 2 Sparxie");
+                    verifyInwardFrames();
+                    viewer.eye=new Location(world,33,102,2.20);
+                    state=13;
+                }
+            }else if(state==13) {
+                int visible=colored(inward.frameFor(viewer.player,Face.NORTH));
+                if(visible<1000)return;
+                check(colored(inward.frameFor(viewer.player,Face.SOUTH))==0,"near outward boundary stays transparent");
+                getConfig().set("near_sparxie_far_face_pixels",visible);
+                List<MapPatches.Tile> tiles=new ArrayList<>();
+                for(Face face:Face.values()) {
+                    int w=face.tileWidth(2,4,2),h=face.tileHeight(2,4,2);
+                    for(int y=0;y<h;y++)for(int x=0;x<w;x++)
+                        tiles.add(new MapPatches.Tile(inward.mapIds.get(face).get(y*w+x),face.name(),w,h,x,y));
+                }
+                plugin.gpu().bindDelivery(inward.id,viewer.id,inward.model,
+                        plugin.nativeMaps().delivery(tiles,packet->packetBundles.incrementAndGet()));
+                readyAt=ticks;state=14;
+            }else if(state==14||state==15) {
+                int step=ticks-readyAt;
+                // Fast fly-by, reversals every half second, and a vertical bob.
+                double angle=.32*(step/10%2==0?step%10:10-step%10)+.13;
+                double x=Math.sin(angle),z=Math.cos(angle);
+                double radius=1.22/Math.max(Math.abs(x),Math.abs(z));
+                viewer.eye=new Location(world,33+radius*x,102+.4*Math.sin(step*.63),1+radius*z);
+                inward.sampleEye(viewer.player,viewer.eye,step%29==0);
+                if(state==14&&step>=30) {
+                    packetBundles.set(0);benchmarkStart=System.nanoTime();readyAt=ticks;state=15;
+                }else if(state==15&&step>=100) {
+                    double fps=packetBundles.get()*1e9/(System.nanoTime()-benchmarkStart);
+                    check(fps>=35,"near, fast 2x4x2 Sparxie sends >=35 bundles/s, got "+fps);
+                    getConfig().set("inward_fast_motion_bundles_per_second",fps);
+                    getLogger().info("Near inward Sparxie fast motion: "+fps+" bundles/s");
                     saveConfig();finish(null);
                 }
             }
@@ -215,6 +256,25 @@ public final class GpuSeamVerifier extends JavaPlugin {
         return cubes.entrySet().stream().filter(entry->!before.contains(entry.getKey())).map(Map.Entry::getValue).findFirst().orElseThrow();
     }
     private static int colored(byte[] pixels){int count=0;for(byte pixel:pixels)if(pixel!=0)count++;return count;}
+    private void verifyInwardFrames() {
+        check(inward.inward&&inward.mapCount()==40,"inward 2x4x2 prism uses 40 maps");
+        for(Face face:Face.values()) {
+            Face basis=face.screenBasis(true);
+            int width=face.tileWidth(2,4,2),height=face.tileHeight(2,4,2);
+            for(int y=0;y<height;y++)for(int x=0;x<width;x++) {
+                var entity=Bukkit.getEntity(inward.frameIds.get(face).get(y*width+x));
+                check(entity instanceof GlowItemFrame,"inward frame uses full light");
+                GlowItemFrame frame=(GlowItemFrame)entity;
+                check(!frame.isVisible()&&frame.isFixed()&&frame.getFacing()==BlockFace.valueOf(basis.name()),"fixed inward orientation "+face);
+                Location screen=frame.getLocation().add(basis.nx()*(CubeGeometry.MAP_OFFSET-.03125),
+                        basis.ny()*(CubeGeometry.MAP_OFFSET-.03125),basis.nz()*(CubeGeometry.MAP_OFFSET-.03125));
+                Location center=inward.faceCenter(face);
+                double[] local=basis.project(screen.getX()-center.getX(),screen.getY()-center.getY(),screen.getZ()-center.getZ());
+                check(Math.abs(local[0]-(x+.5-width*.5))<1e-6&&Math.abs(local[1]-(y+.5-height*.5))<1e-6
+                        &&Math.abs(local[2])<1e-6,"frame's physical map plane and tile placement "+face);
+            }
+        }
+    }
     private void verifyVanillaSuppression()throws Exception {
         check(plugin.nativeMaps()!=null,"native Paper adapter constructed");
         MapView map=Bukkit.createMap(world);
@@ -256,6 +316,7 @@ public final class GpuSeamVerifier extends JavaPlugin {
         @Override public Object invoke(Object proxy,Method method,Object[] arguments) {
             return switch(method.getName()) {
                 case "getUniqueId" -> id;
+                case "getPing" -> 0;
                 case "getWorld" -> world;
                 case "getEyeLocation","getLocation" -> eye.clone();
                 case "getName" -> "GpuSeamVerifier";

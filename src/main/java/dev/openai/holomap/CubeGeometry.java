@@ -4,7 +4,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Six outward-facing cube screens. Each face's (right, up, normal) vectors are
+ * Six cube boundaries. Each face's (right, up, normal) vectors are
  * fixed in world coordinates. A single world-aligned model is projected onto
  * every screen, so a viewer walking around the cube sees the model's reverse
  * side, not six identical, front-facing images.
@@ -31,6 +31,20 @@ public final class CubeGeometry {
         public int nx(){return n[0];}public int ny(){return n[1];}public int nz(){return n[2];}
         public int rx(){return r[0];}public int ry(){return r[1];}public int rz(){return r[2];}
         public int ux(){return u[0];}public int uy(){return u[1];}public int uz(){return u[2];}
+        public Face screenBasis(boolean inward) {
+            if (!inward) return this;
+            return switch (this) {
+                case NORTH -> SOUTH;
+                case SOUTH -> NORTH;
+                case EAST -> WEST;
+                case WEST -> EAST;
+                case UP -> DOWN;
+                case DOWN -> UP;
+            };
+        }
+        public double screenDepth(int width,int height,int depth,boolean inward) {
+            return (inward ? -.5 : .5)*thickness(width,height,depth)+MAP_OFFSET;
+        }
         public double[] project(double x,double y,double z){
             return new double[]{x*r[0]+y*r[1]+z*r[2],x*u[0]+y*u[1]+z*u[2],x*n[0]+y*n[1]+z*n[2]};
         }
@@ -50,14 +64,18 @@ public final class CubeGeometry {
         }
         /** Index of the solid support block, relative to the rectangular prism's minimum corner. */
         public int[] support(int width,int height,int depth,int tileX,int tileY) {
+            return support(width,height,depth,tileX,tileY,false);
+        }
+        public int[] support(int width,int height,int depth,int tileX,int tileY,boolean inward) {
             int fw=tileWidth(width,height,depth),fh=tileHeight(width,height,depth);
             if(width<1||height<1||depth<1||tileX<0||tileX>=fw||tileY<0||tileY>=fh)
                 throw new IllegalArgumentException("Invalid rectangular face tile");
             int[] dimensions={width,height,depth},result=new int[3];
+            Face basis=screenBasis(inward);
             for(int axis=0;axis<3;axis++) {
                 if(n[axis]!=0)result[axis]=n[axis]>0?dimensions[axis]-1:0;
-                else if(r[axis]!=0)result[axis]=r[axis]>0?tileX:dimensions[axis]-1-tileX;
-                else result[axis]=u[axis]>0?tileY:dimensions[axis]-1-tileY;
+                else if(basis.r[axis]!=0)result[axis]=basis.r[axis]>0?tileX:dimensions[axis]-1-tileX;
+                else result[axis]=basis.u[axis]>0?tileY:dimensions[axis]-1-tileY;
             }
             return result;
         }

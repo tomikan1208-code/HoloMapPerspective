@@ -1,5 +1,5 @@
 name: HoloMapGpuVerifier
-version: 0.6.0
+version: 0.7.0
 main: dev.openai.holomap.verification.GpuSeamVerifier
 api-version: '26.3'
 depend: [HoloMapPerspective]

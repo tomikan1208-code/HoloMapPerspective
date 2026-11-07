@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.0
+- Project onto inward-facing maps on new clear prisms for better detail at close range.
+- Use invisible glow frames to preserve colors in low light.
+- Sample accepted movement and discard renders superseded by sharp turns or teleports.
+- Schedule the next frame as the renderer becomes available and reduce rendering cost for large moving displays.
+- Preserve PMX normals, toon and sphere textures, outlines, and translucent material layers in HMAPTEX2.
+
 ## 0.6.0
 - Read prepared PMX diffuse textures, UVs and alpha through the HMAPTEX1 GPU format.
 - Fit real model bounds to all three prism dimensions while preserving aspect ratio.

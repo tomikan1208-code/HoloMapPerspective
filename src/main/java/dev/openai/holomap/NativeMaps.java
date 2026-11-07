@@ -5,6 +5,7 @@ import org.bukkit.map.MapView;
 import java.lang.reflect.*;
 import java.util.*;
 import java.util.function.Consumer;
+import java.util.function.BooleanSupplier;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Paper 26.3 packet adapter. Constructed/bound on the server thread; delivery only touches Netty. */
@@ -39,9 +40,18 @@ public final class NativeMaps {
         try {
             Object handle=player.getClass().getMethod("getHandle").invoke(player);
             Object listener=handle.getClass().getField("connection").get(handle);
+            if(listener==null)return null;
             Method send=listener.getClass().getMethod("send",packetClass);
+            Object connection=listener.getClass().getField("connection").get(listener);
+            Object channel=connection.getClass().getField("channel").get(connection);
+            Class<?> channelType=Class.forName("io.netty.channel.Channel");
+            Method active=channelType.getMethod("isActive");
+            Method writable=channelType.getMethod("isWritable");
             return delivery(tiles,packet->{
                 try{send.invoke(listener,packet);}catch(ReflectiveOperationException ex){throw new IllegalStateException(ex);}
+            },()->{
+                try{return channel!=null&&(boolean)active.invoke(channel)&&(boolean)writable.invoke(channel);}
+                catch(ReflectiveOperationException ex){return false;}
             });
         }catch(ReflectiveOperationException ex){return null;}
     }
@@ -56,9 +66,13 @@ public final class NativeMaps {
     }
     /** Also used by the opt-in real-Paper verifier with an in-memory packet receiver. */
     public GpuEngine.Delivery delivery(List<MapPatches.Tile> tiles,Consumer<Object> receiver) {
+        return delivery(tiles,receiver,()->true);
+    }
+    private GpuEngine.Delivery delivery(List<MapPatches.Tile> tiles,Consumer<Object> receiver,BooleanSupplier writable) {
         MapPatches changes=new MapPatches(tiles);
         return new GpuEngine.Delivery() {
             private final AtomicBoolean reset=new AtomicBoolean();
+            @Override public boolean ready(){return writable.getAsBoolean();}
             @Override public void reset(){reset.set(true);}
             @Override public boolean send(GpuEngine.Scene scene)throws Exception {
                 if(reset.getAndSet(false))changes.reset();

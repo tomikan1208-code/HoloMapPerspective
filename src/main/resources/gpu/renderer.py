@@ -38,6 +38,8 @@ VERTEX = '''#version 330
 in vec3 in_pos;
 in uint in_rgb;
 in vec2 in_uv;
+in vec3 in_normal;
+in float in_edge;
 uniform vec3 u_mid;
 uniform float u_normalization;
 uniform vec3 u_eye;
@@ -48,11 +50,15 @@ uniform vec3 u_right;
 uniform vec3 u_up;
 uniform vec3 u_normal;
 uniform bool u_vertex_alpha;
+uniform bool u_outline;
+uniform float u_edge_size;
 out vec4 v_color;
 out vec2 v_uv;
 out vec3 v_world;
+out vec3 v_normal;
 void main() {
     vec3 world = (in_pos-u_mid)*u_normalization;
+    if (u_outline) world += in_normal * in_edge * u_edge_size * 0.0025;
     vec3 p = vec3(dot(world,u_right),dot(world,u_up),dot(world,u_normal))*u_size;
     p.z -= u_depth;
     float d = u_eye.z-p.z;
@@ -62,6 +68,7 @@ void main() {
                        d*1.0004-0.04,
                        d);
     v_world = world;
+    v_normal = in_normal;
     v_uv = in_uv;
     v_color = vec4(vec3(float((in_rgb >> 16u) & 255u),
                    float((in_rgb >> 8u) & 255u),
@@ -74,16 +81,51 @@ in vec4 v_color;
 in vec2 v_uv;
 uniform bool u_textured;
 uniform sampler2D u_texture;
+uniform bool u_pmx;
+uniform bool u_two_sided;
+uniform bool u_blend;
+uniform bool u_outline;
+uniform vec4 u_edge_color;
+uniform bool u_has_toon;
+uniform sampler2D u_toon;
+uniform int u_sphere_mode;
+uniform sampler2D u_sphere;
+uniform vec3 u_sphere_right;
+uniform vec3 u_sphere_up;
 in vec3 v_world;
+in vec3 v_normal;
 out vec4 out_color;
 void main() {
+    vec4 color = v_color * (u_textured ? texture(u_texture,v_uv) : vec4(1));
+    if (color.a < (u_blend ? 0.00392 : 0.5)) discard;
+    if (u_outline) {
+        if (gl_FrontFacing) discard;
+        out_color = vec4(u_edge_color.rgb, 1.0);
+        return;
+    }
+    if (u_pmx) {
+        if (!u_two_sided && !gl_FrontFacing) discard;
+        vec3 normal = normalize(v_normal + vec3(1e-10));
+        if (!gl_FrontFacing) normal = -normal;
+        float light = dot(normal, normalize(vec3(.26,.72,.64)));
+        if (u_has_toon) {
+            float ramp = clamp(light*.5 + .5, .002, .998);
+            color.rgb *= texture(u_toon, vec2(.5, ramp)).rgb;
+        }
+        if (u_sphere_mode != 0) {
+            vec2 uv = vec2(dot(normal,u_sphere_right), dot(normal,u_sphere_up))*.5+.5;
+            vec3 reflection = texture(u_sphere, clamp(uv, .002, .998)).rgb;
+            if (u_sphere_mode == 1) color.rgb *= reflection;
+            else color.rgb += reflection*.55;
+        }
+        out_color = color;
+        return;
+    }
     vec3 n = cross(dFdx(v_world), dFdy(v_world));
     // Derivatives face the camera; restore the mesh winding for world-fixed lighting.
     if (!gl_FrontFacing) n = -n;
     n = normalize(n+vec3(1e-10));
     float light = clamp(0.64 + 0.3*abs(n.z) + 0.13*n.y, 0.34, 1.0);
-    vec4 color = v_color * (u_textured ? texture(u_texture,v_uv) : vec4(1));
-    if (color.a < 0.5) discard;
     out_color = vec4(color.rgb*light, color.a);
 }
 '''
@@ -110,6 +152,8 @@ class GpuRenderer:
         self.mesh_textures={}
         self.textures={}
         self.program['u_texture'].value=0
+        self.program['u_toon'].value=1
+        self.program['u_sphere'].value=2
         self.targets={}
         self.ctx.enable_only(moderngl.DEPTH_TEST)
         self.ctx.depth_func='<'
@@ -120,14 +164,16 @@ class GpuRenderer:
             return self.meshes[path]
         with open(path, 'rb') as file:
             header=read_exact(file,36)
-            textured=header[:8]==b'HMAPTEX1'
-            if header[:8] not in (b'HMAPGPU1',b'HMAPTEX1'):
+            signature=header[:8]
+            pmx=signature==b'HMAPTEX2'
+            textured=pmx or signature==b'HMAPTEX1'
+            if signature not in (b'HMAPGPU1',b'HMAPTEX1',b'HMAPTEX2'):
                 raise ValueError('Invalid HMAP GPU mesh header: '+path)
             triangles,=struct.unpack_from('<i',header,8)
             if triangles<1:
                 raise ValueError('Empty mesh cache: '+path)
             # Transfer the compact binary mesh to GPU in bounded chunks (no large Python bytes object).
-            byte_count=triangles*(72 if textured else 48)
+            byte_count=triangles*(120 if pmx else 72 if textured else 48)
             if os.fstat(file.fileno()).st_size!=36+byte_count:
                 raise ValueError('Corrupt mesh cache: '+path)
             vbo=self.ctx.buffer(reserve=byte_count)
@@ -139,7 +185,12 @@ class GpuRenderer:
                     raise EOFError('Mesh cache truncated: '+path)
                 vbo.write(chunk,offset=offset)
                 offset+=len(chunk)
-        content=(vbo,'3f 1u 2f','in_pos','in_rgb','in_uv') if textured else (vbo,'3f 1u','in_pos','in_rgb')
+        if pmx:
+            content=(vbo,'3f 1u 2f 3f 1f','in_pos','in_rgb','in_uv','in_normal','in_edge')
+        elif textured:
+            content=(vbo,'3f 1u 2f','in_pos','in_rgb','in_uv')
+        else:
+            content=(vbo,'3f 1u','in_pos','in_rgb')
         vao=self.ctx.vertex_array(self.program,[content])
         segments=[]
         textures=set()
@@ -150,13 +201,20 @@ class GpuRenderer:
             for segment in manifest['segments']:
                 if segment['first']!=expected or segment['count']<0:
                     raise ValueError('Invalid textured mesh draw range')
-                texture=None
-                if segment.get('texture'):
-                    texture=(Path(path).parent/segment['texture']).resolve()
+                for role in ('texture','toon','sphere'):
+                    if not segment.get(role):
+                        continue
+                    texture=(Path(path).parent/segment[role]).resolve()
                     if not texture.is_relative_to(Path(path).parent.resolve()):
                         raise ValueError('Texture must be inside the model directory')
                     textures.add(str(texture))
-                segments.append((segment['first'],segment['count'],str(texture) if texture else None))
+                    segment[role]=str(texture)
+                # Adjacent materials with identical shader inputs share one draw.
+                if pmx and segments and all(segments[-1].get(key)==segment.get(key) for key in
+                        ('texture','toon','sphere','sphere_mode','two_sided','blend','edge_color','edge_size')):
+                    segments[-1]['count']+=segment['count']
+                else:
+                    segments.append(segment)
                 expected+=segment['count']
             if expected!=triangles*3:raise ValueError('Texture ranges do not cover mesh')
             for texture_path in textures:
@@ -169,8 +227,8 @@ class GpuRenderer:
                         texture.filter=(self.moderngl.LINEAR_MIPMAP_LINEAR,self.moderngl.LINEAR)
                     self.textures[texture_path]=[texture,0]
                 self.textures[texture_path][1]+=1
-        else:segments=[(0,triangles*3,None)]
-        self.materials[path]=(textured,segments)
+        else:segments=[{'first':0,'count':triangles*3}]
+        self.materials[path]=(textured,pmx,segments)
         self.mesh_textures[path]=textures
         self.meshes[path]=(vbo,vao,triangles)
         # Keep several displays plus their next animation frames resident together.
@@ -222,16 +280,81 @@ class GpuRenderer:
         fbo.use()
         self.ctx.viewport=(0,0,width,height)
         fbo.clear(0,0,0,0,depth=1.0)
-        textured,segments=self.materials[path]
+        textured,pmx,segments=self.materials[path]
         self.program['u_vertex_alpha'].value=textured
-        for first,vertices,texture_path in segments:
-            self.program['u_textured'].value=texture_path is not None
-            if texture_path:self.textures[texture_path][0].use(location=0)
-            vao.render(self.moderngl.TRIANGLES,vertices=vertices,first=first)
+        self.program['u_pmx'].value=pmx
+        self.program['u_outline'].value=False
+        self.program['u_blend'].value=False
+        if pmx:
+            self.draw_pmx(vao, segments, fbo, ex, ey, ez+depth, basis)
+        else:
+            for segment in segments:
+                self.bind_image(segment, 'texture', 0, 'u_textured')
+                vao.render(self.moderngl.TRIANGLES,vertices=segment['count'],first=segment['first'])
         rgba=fbo.read(components=4,alignment=1)
         # OpenGL returns bottom-first pixels; map canvases are top-first.
         stride=width*4
         return b''.join(rgba[row*stride:(row+1)*stride] for row in range(height-1,-1,-1))
+
+    def bind_image(self, segment, role, slot, uniform):
+        path=segment.get(role)
+        if uniform:
+            self.program[uniform].value=bool(path)
+        if path:
+            self.textures[path][0].use(location=slot)
+
+    def draw_pmx(self, vao, segments, fbo, ex, ey, ez, basis):
+        # Transform the eye into model axes so all six maps share the same reflections.
+        x,y,z=(ex*basis[i]+ey*basis[i+3]+ez*basis[i+6] for i in range(3))
+        horizontal=(x*x+z*z)**.5
+        right=(z/horizontal,0,-x/horizontal) if horizontal>1e-6 else (1,0,0)
+        distance=max(1e-6,(horizontal*horizontal+y*y)**.5)
+        up=(y*right[2]/distance,(z*right[0]-x*right[2])/distance,-y*right[0]/distance)
+        self.program['u_sphere_right'].value=right
+        self.program['u_sphere_up'].value=up
+
+        def draw(segment):
+            self.bind_image(segment,'texture',0,'u_textured')
+            self.bind_image(segment,'toon',1,'u_has_toon')
+            self.bind_image(segment,'sphere',2,None)
+            self.program['u_sphere_mode'].value=segment.get('sphere_mode',0) if segment.get('sphere') else 0
+            self.program['u_two_sided'].value=segment.get('two_sided',False)
+            vao.render(self.moderngl.TRIANGLES,vertices=segment['count'],first=segment['first'])
+
+        for segment in segments:
+            if not segment.get('blend'):
+                draw(segment)
+
+        if any(segment.get('blend') for segment in segments):
+            self.program['u_blend'].value=True
+            self.ctx.enable(self.moderngl.BLEND)
+            self.ctx.blend_func=(self.moderngl.SRC_ALPHA,self.moderngl.ONE_MINUS_SRC_ALPHA,
+                                 self.moderngl.ONE,self.moderngl.ONE_MINUS_SRC_ALPHA)
+            fbo.depth_mask=False
+            try:
+                for segment in segments:
+                    if segment.get('blend'):
+                        draw(segment)
+            finally:
+                fbo.depth_mask=True
+                self.ctx.disable(self.moderngl.BLEND)
+        # Fill the silhouette outside the visible surface. Thin hair cards and
+        # seams retain their painted detail instead of acquiring dark pinholes.
+        self.program['u_blend'].value=False
+        self.program['u_outline'].value=True
+        self.ctx.enable(self.moderngl.BLEND)
+        self.ctx.blend_func=(self.moderngl.ONE_MINUS_DST_ALPHA,self.moderngl.ONE)
+        fbo.depth_mask=False
+        try:
+            for segment in segments:
+                if segment.get('edge_size',0)>0 and not segment.get('blend'):
+                    self.program['u_edge_size'].value=segment['edge_size']
+                    self.program['u_edge_color'].value=tuple(segment['edge_color'])
+                    self.bind_image(segment,'texture',0,'u_textured')
+                    vao.render(self.moderngl.TRIANGLES,vertices=segment['count'],first=segment['first'])
+        finally:
+            fbo.depth_mask=True
+            self.ctx.disable(self.moderngl.BLEND)
 
 
 def main():

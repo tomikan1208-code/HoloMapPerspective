@@ -35,6 +35,7 @@ public final class HoloMapVerifier extends JavaPlugin {
         },30L);
     }
     private void firstPhase() throws Exception {
+        plugin.getConfig().set("cube-inward",false);
         for(CubeDisplay prior:new ArrayList<>(cubes().values()))
             if(prior.baseY==128&&((prior.baseX==128&&prior.baseZ==128)||(prior.baseX==160&&prior.baseZ==160)))command("remove "+prior.id);
         for(Display prior:new ArrayList<>(displays().values()))

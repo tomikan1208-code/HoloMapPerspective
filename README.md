@@ -1,4 +1,4 @@
-# HoloMapPerspective v0.6.0 — GPU描画・テクスチャ・最大60fps送信
+# HoloMapPerspective v0.7.0 — 内向き地図・GPU描画・最大60fps送信
 
 アップロードされた **v0.4.0** を基礎として変更した、Minecraft Java **26.3 / Paper 26.3 / Java 25** 用プラグインのソースです。クライアントMODは不要。正面1面の表示と、6面すべてにプレイヤー別視差を反映した立方体・直方体表示に対応します。
 
@@ -9,13 +9,15 @@ GPU版はPaperと同じPCのPython 3・ModernGL・Pillowを使います。OpenGL
 1. **JDK 25** と Python 3 をインストール。NVIDIA/AMD/Intel のGPUドライバを最新版に更新。
 2. PowerShellで `py -3 -m pip install -r gpu-requirements.txt` を実行。`python -m pip ...` でも可。
 3. `JAVA_HOME` にJDK 25のインストール先を設定し、ソースのフォルダで `.\gradlew.bat build` を実行。
-4. `build/libs/HoloMapPerspective-0.6.0.jar` をPaper 26.3サーバーの `plugins` フォルダへ配置し、旧版のJARをplugins外へ退避。サーバーを完全再起動。
+4. `build/libs/HoloMapPerspective-0.7.0.jar` をPaper 26.3サーバーの `plugins` フォルダへ配置し、旧版のJARをplugins外へ退避。サーバーを完全再起動。
 5. 起動時に `plugins/HoloMapPerspective/gpu/renderer.py` が同梱版へ更新される。`config.yml`の`gpu-python-command`が利用可能なPythonコマンド（例:`python`、`py -3`）であることを確認。自分で変更したGPUスクリプトは事前に保存する。
 6. `/holomap cube 1 1 1 demo` を実行。`/holomap status` でモデルの準備状況と実際のOpenGL実行環境を確認する。
 
 正式なPaper APIとJava 25でビルドし、RTX 3050の実GPUと独立したPaperテストサーバーで検証しています。[0.6.0の検証記録](docs/gpu-0.6.0-verification.md)
 
-0.6.0では、テクスチャ付きGPUモデル、各軸の実寸に基づく直方体への自動フィット、最大60fpsの地図差分送信に対応しました。移動中は直近2回の視点と速度を使い、次のサーバー更新まで最大1tick分を補います。テレポートや古いサンプルは予測せず、6面を同じ時刻で描いて同じパケット束で送ります。0.5.1の空白タイル修正も含みます。
+0.7.0では、新しい透明な直方体の地図を内向きに置きます。プレイヤーの視点から見て奥の面に投影すると、近づいたときもモデルに使える画素が増えます。近くで見るなら2×4×2が目安です。発光額縁で暗い場所でもモデルの色を保ちます。
+
+GPU方式では移動イベントで視点を更新し、描画時間と通信の遅れを短い予測で補います。急な切り返しやテレポートで古くなった描画は破棄します。大きい直方体で移動中の負荷が高い場合は描画を軽くし、静止時に細部を描き直します。
 
 ## 主なコマンド
 
@@ -55,7 +57,7 @@ plugins/
     gpu-renderer.log       ← GPU起動/描画失敗時のログ
 ```
 
-モデル名はフォルダ名です。通常は `.obj` と `.mtl` の `Kd` 色を読み込みます。GPU方式では `model.hmesh` があれば同じフォルダの `model.obj` より優先します。`HMAPTEX1` 形式のhmeshはUV・材質色・画像の透明部分を扱い、`model.hmesh.materials.json` と相対パスの `textures/` を一緒に置きます。元OBJの画像テクスチャやPMXをプラグインが直接読むわけではありません。アニメーションは `frames/*.obj` の連番に対応します。
+モデル名はフォルダ名です。通常は `.obj` と `.mtl` の `Kd` 色を読み込みます。GPU方式では `model.hmesh` があれば同じフォルダの `model.obj` より優先します。`HMAPTEX1` と `HMAPTEX2` には、`model.hmesh.materials.json` と相対パスの `textures/` を一緒に置きます。`tools/prepare_pmx.py` で作る `HMAPTEX2` は、PMXの法線、陰影用・反射用画像、輪郭線と半透明の材質を使います。アニメーションは `frames/*.obj` の連番に対応します。
 
 今回のSparxieは `tools/prepare_pmx.py` で元PMXの拡散テクスチャ7枚を含む静止モデルに変換しました。骨・VMD・トゥーン・スフィアマップは変換しません。家は `tools/prepare_house_lod.py` をBlenderのバックグラウンド処理で使い、原本を保存せずメッシュのコピーを軽量化しました。変換済みの個人用モデルはこのプロジェクトの `prepared-models/`、サーバー用コピーは `plugins/HoloMapPerspective/models/` に保存します。
 
@@ -65,6 +67,8 @@ plugins/
 
 ```yaml
 renderer-backend: gpu
+cube-inward: true
+cube-glow: true
 render-fps: 60
 animation-fps: 60
 gpu-python-command: python
@@ -74,6 +78,8 @@ max-animation-frames: 120
 max-prism-axis: 8
 max-prism-maps: 96
 ```
+
+`cube-inward` と `cube-glow` は新しく作る直方体に適用します。内向き投影には `cube-material: AIR` または `BARRIER` を使ってください。外向きの地図で作るには `cube-inward: false` を設定します。
 
 `max-obj-bytes` は**OBJ原本の容量**、`max-triangles` は**三角形換算ポリゴン数**の上限です。設定を増やせば、読み込み可能なモデルは増えますが、VRAM消費やレンダリング時間も増加します。600MBのOBJも容量上限には収まりますが、ポリゴン数上限は別に確認が必要です。`/holomap status` で `FAILED` の理由を確認できます。
 

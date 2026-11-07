@@ -1,6 +1,6 @@
 plugins { java }
 group = "dev.openai"
-version = "0.6.0"
+version = "0.7.0"
 
 repositories { mavenCentral(); maven("https://repo.papermc.io/repository/maven-public/") }
 
