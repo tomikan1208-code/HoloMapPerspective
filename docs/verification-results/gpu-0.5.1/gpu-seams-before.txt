@@ -1,0 +1,5 @@
+FAIL: java.lang.AssertionError: REGRESSION: front face returns foreground to first tile but cached blank to next tile after walking behind
+Plugin: 0.5.0
+Assertions: 2
+Views checked: 0
+GPU: READY NVIDIA Corporation / NVIDIA GeForce RTX 3050/PCIe/SSE2; queued: 0

@@ -1,0 +1,6 @@
+ALL_PASS
+26.3-243-7ef2f69 (MC: 26.3)
+Assertions: 484
+PASS: real server restart preserves dimensions, models, map IDs, UUIDs and contextual renderers
+PASS: removal after chunk unload, no orphan frames, modified blocks preserved and renderers released
+PASS: optional solid backing and modified-block protection

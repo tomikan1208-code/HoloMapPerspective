@@ -1,0 +1,30 @@
+# GPU rendering/delivery target; independent of 20TPS on supported Paper 26.3.
+gpu-configuration-version: 1
+# 1..60. Actual rate depends on GPU, map sizes, viewers and bandwidth. CPU fallback <=20.
+render-fps: 60
+# How quickly OBJ frame sequences play (repetition is automatic).
+animation-fps: 60
+# Skip rendering when the player's eye is further from the screen than this.
+view-distance: 16.0
+# Limit imported OBJ mesh complexity; larger models should be decimated in Blender.
+max-triangles: 3000000
+# Per-file size limit: 1.5GB; converted once on a worker thread and then cached as a GPU mesh.
+max-obj-bytes: 1500000000
+# gpu = OpenGL sidecar (default); cpu = old small-OBJ fallback, 10MB hard limit.
+renderer-backend: gpu
+# Python 3 installed on the Paper machine, with modernGL installed.
+gpu-python-command: python
+max-animation-frames: 120
+# The 3D scene is located behind the item frame plane, in blocks.
+model-depth: 0.75
+model-scale: 0.82
+# Max placed display size (width and height in item frames).
+max-display-size: 3
+# AIR leaves the prism empty. Fixed, invisible frames need no backing blocks.
+# Choose a solid block (e.g. BLACK_CONCRETE) only for an opaque display.
+cube-material: AIR
+
+# Maximum edge length for six-face rectangular prisms. Default supports 2 3 4.
+max-prism-axis: 8
+# Limit the total number of maps in a rectangular prism to avoid CPU/network overload.
+max-prism-maps: 96

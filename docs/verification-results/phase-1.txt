@@ -1,0 +1,8 @@
+PHASE_1_PASS: stop and restart for persistence/removal checks
+26.3-243-7ef2f69 (MC: 26.3)
+Assertions: 429
+PASS: transparent 1x1x1 and 2x3x4 placement (58 frames), all six orientations and map IDs
+PASS: obstruction, overlap, invalid dimensions, map budget, missing model and world-height validation
+PASS: player-specific transparent canvases, 360-degree views, top/bottom, hidden/distant faces and refresh dispatch
+PASS: legacy planar command, 2x2 tile placement, transparent initialization and physical projection plane
+PASS: external OBJ/MTL model switch, reload and timed animation

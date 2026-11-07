@@ -1,0 +1,166 @@
+{
+  "result": "FAIL",
+  "gpu": "READY NVIDIA Corporation / NVIDIA GeForce RTX 3050/PCIe/SSE2",
+  "cases": 42,
+  "worst_interior_holes": 0,
+  "worst_color_errors": 3128,
+  "worst_center_error": 0.6789,
+  "failures": [
+    {
+      "dimensions": [
+        1,
+        2,
+        1
+      ],
+      "angle": 0,
+      "elevation": 4.0,
+      "holes": 0,
+      "color_errors": 12,
+      "stable_pixels": 88,
+      "center_error": 0.0
+    },
+    {
+      "dimensions": [
+        1,
+        2,
+        1
+      ],
+      "angle": 90,
+      "elevation": 4.0,
+      "holes": 0,
+      "color_errors": 12,
+      "stable_pixels": 48,
+      "center_error": 0.0
+    },
+    {
+      "dimensions": [
+        1,
+        2,
+        1
+      ],
+      "angle": 180,
+      "elevation": 4.0,
+      "holes": 0,
+      "color_errors": 18,
+      "stable_pixels": 106,
+      "center_error": 0.0
+    },
+    {
+      "dimensions": [
+        1,
+        2,
+        1
+      ],
+      "angle": 270,
+      "elevation": 4.0,
+      "holes": 0,
+      "color_errors": 12,
+      "stable_pixels": 48,
+      "center_error": 0.0
+    },
+    {
+      "dimensions": [
+        1,
+        2,
+        1
+      ],
+      "angle": "pole",
+      "elevation": -6.0,
+      "holes": 0,
+      "color_errors": 26,
+      "stable_pixels": 26,
+      "center_error": 0.14770696843359588
+    },
+    {
+      "dimensions": [
+        1,
+        2,
+        1
+      ],
+      "angle": "pole",
+      "elevation": 6.0,
+      "holes": 0,
+      "color_errors": 72,
+      "stable_pixels": 72,
+      "center_error": 0.04794520547945069
+    },
+    {
+      "dimensions": [
+        2,
+        4,
+        2
+      ],
+      "angle": 0,
+      "elevation": 4.0,
+      "holes": 0,
+      "color_errors": 104,
+      "stable_pixels": 648,
+      "center_error": 0.07071333628709908
+    },
+    {
+      "dimensions": [
+        2,
+        4,
+        2
+      ],
+      "angle": 90,
+      "elevation": 4.0,
+      "holes": 0,
+      "color_errors": 95,
+      "stable_pixels": 358,
+      "center_error": 0.060457675311062345
+    },
+    {
+      "dimensions": [
+        2,
+        4,
+        2
+      ],
+      "angle": 180,
+      "elevation": 4.0,
+      "holes": 0,
+      "color_errors": 112,
+      "stable_pixels": 726,
+      "center_error": 0.026523788046091568
+    },
+    {
+      "dimensions": [
+        2,
+        4,
+        2
+      ],
+      "angle": 270,
+      "elevation": 4.0,
+      "holes": 0,
+      "color_errors": 95,
+      "stable_pixels": 358,
+      "center_error": 0.060457675311062345
+    },
+    {
+      "dimensions": [
+        2,
+        4,
+        2
+      ],
+      "angle": 0,
+      "elevation": -4.0,
+      "holes": 0,
+      "color_errors": 42,
+      "stable_pixels": 614,
+      "center_error": 0.16278122607236867
+    },
+    {
+      "dimensions": [
+        2,
+        4,
+        2
+      ],
+      "angle": 90,
+      "elevation": -4.0,
+      "holes": 0,
+      "color_errors": 30,
+      "stable_pixels": 221,
+      "center_error": 0.16758302885591903
+    }
+  ]
+}

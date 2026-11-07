@@ -1,0 +1,17 @@
+completed_scenes_per_second: 20.001114862142416
+poses: 76
+renderer: 'READY NVIDIA Corporation / NVIDIA GeForce RTX 3050/PCIe/SSE2; queued: 0;
+  target: 60 fps; complete scenes: 257; sent bundles: 0; last batch: 9.5 ms'
+map_refresh_calls: 9600
+native_bundles_per_second:
+  demo: 58.53860237228785
+  Sparxie: 53.50112997592569
+  home: 41.45011401684865
+triangles:
+  demo: 96
+  Sparxie: 52228
+  home: 637073
+three_displays_bundles_per_second:
+  home: 39.02482525233602
+  Sparxie: 35.21749111913923
+  demo: 54.62641952153739

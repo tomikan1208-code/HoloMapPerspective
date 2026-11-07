@@ -1,0 +1,17 @@
+name: HoloMapPerspective
+version: 0.6.0
+main: dev.openai.holomap.HoloMapPlugin
+api-version: '26.3'
+author: OpenAI
+website: https://papermc.io/
+description: Transparent, viewer-dependent 3D OBJ projection on planar and six-face map displays.
+commands:
+  holomap:
+    description: Create and manage perspective map displays.
+    usage: /holomap help
+    aliases: [hmap]
+    permission: holomap.admin
+permissions:
+  holomap.admin:
+    description: Manage HoloMap displays.
+    default: op

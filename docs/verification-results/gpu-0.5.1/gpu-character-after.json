@@ -1,0 +1,9 @@
+{
+  "result": "PASS",
+  "gpu": "READY NVIDIA Corporation / NVIDIA GeForce RTX 3050/PCIe/SSE2",
+  "cases": 222,
+  "worst_interior_holes": 0,
+  "worst_color_errors": 0,
+  "worst_center_error": 0.4835,
+  "failures": []
+}

@@ -1,0 +1,6 @@
+name: HoloMapGpuVerifier
+version: 0.6.0
+main: dev.openai.holomap.verification.GpuSeamVerifier
+api-version: '26.3'
+depend: [HoloMapPerspective]
+description: Opt-in hardware GPU integration checks for an isolated test server only.

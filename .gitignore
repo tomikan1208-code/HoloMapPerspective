@@ -1,0 +1,18 @@
+.gradle/
+build/
+*.class
+__pycache__/
+*.pyc
+.gpu-cache/
+gpu-cache/
+
+# Local prepared character/house assets are retained outside disposable build output.
+/prepared-models/
+
+# Local build and server diagnostics.
+/build_log_*.txt
+*.log
+/docs/verification-results/**/deployment-status.txt
+/docs/verification-results/**/live-server-status.json
+/docs/verification-results/**/prepared-model-preview.json
+/docs/0.1.0-#U*.md

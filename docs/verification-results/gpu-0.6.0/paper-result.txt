@@ -1,0 +1,5 @@
+PASS
+Plugin: 0.6.0
+Assertions: 1730
+Views checked: 76
+GPU: READY NVIDIA Corporation / NVIDIA GeForce RTX 3050/PCIe/SSE2; queued: 2; target: 60 fps; complete scenes: 2150; sent bundles: 1878; last batch: 4.0 ms; streams: #10:49.3 fps, #11:44.7 fps, #12:60.2 fps

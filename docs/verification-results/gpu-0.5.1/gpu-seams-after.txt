@@ -1,0 +1,5 @@
+PASS
+Plugin: 0.5.1
+Assertions: 1668
+Views checked: 76
+GPU: READY NVIDIA Corporation / NVIDIA GeForce RTX 3050/PCIe/SSE2; queued: 0; complete scenes: 255; last batch: 10.0 ms
