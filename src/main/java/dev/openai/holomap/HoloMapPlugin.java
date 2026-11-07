@@ -11,6 +11,8 @@ import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.util.RayTraceResult;
 import org.bukkit.util.Vector;
 import org.bukkit.event.*;
+import org.bukkit.event.hanging.HangingBreakByEntityEvent;
+import org.bukkit.event.hanging.HangingBreakEvent;
 import org.bukkit.event.player.PlayerMoveEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.player.PlayerTeleportEvent;
@@ -134,7 +136,7 @@ public final class HoloMapPlugin extends JavaPlugin implements CommandExecutor, 
             models.load(model);
             CubeDisplay cube=new CubeDisplay(this,id,world,c.getInt("x"),c.getInt("y"),c.getInt("z"),
                     width,height,depth,model,c.getString("block-material","BLACK_CONCRETE"),c.getBoolean("inward"),
-                    CubeFill.parse(c.getString("fill","solid")),maps,frames);
+                    CubeFill.parse(c.getString("fill","solid")),c.getBoolean("backing-outside"),maps,frames);
             cubes.put(id,cube);cube.installRenderers();nextId=Math.max(nextId,id+1);
         }catch(Exception ex){getLogger().warning("Could not load cube "+key+": "+ex.getMessage());}
     }
@@ -186,6 +188,22 @@ public final class HoloMapPlugin extends JavaPlugin implements CommandExecutor, 
         for(Display display:displays.values())display.sampleEye(player,eye,teleport);
         for(CubeDisplay cube:cubes.values())cube.sampleEye(player,eye,teleport);
     }
+    @EventHandler(priority=EventPriority.HIGHEST,ignoreCancelled=true)
+    public void keepDisplayFrames(HangingBreakEvent event) {
+        if(!(event.getEntity() instanceof ItemFrame frame))return;
+        boolean physics=event.getCause()==HangingBreakEvent.RemoveCause.PHYSICS
+                ||event.getCause()==HangingBreakEvent.RemoveCause.OBSTRUCTION;
+        boolean lockedBreak=frame.isFixed()&&event instanceof HangingBreakByEntityEvent attack
+                &&attack.getRemover() instanceof Player;
+        if(!physics&&!lockedBreak)return;
+        UUID id=frame.getUniqueId();
+        for(Display display:displays.values()) {
+            if(display.frameIds.contains(id)){event.setCancelled(true);return;}
+        }
+        for(CubeDisplay cube:cubes.values()) {
+            if(cube.frameIds.values().stream().anyMatch(ids->ids.contains(id))){event.setCancelled(true);return;}
+        }
+    }
     @Override public boolean onCommand(CommandSender sender,Command command,String label,String[] args) {
         if(!sender.hasPermission("holomap.admin")){sender.sendMessage("§cNo permission.");return true;}
         if(args.length==0||args[0].equalsIgnoreCase("help")){help(sender);return true;}
@@ -195,6 +213,7 @@ public final class HoloMapPlugin extends JavaPlugin implements CommandExecutor, 
             case "create" -> createAt(sender,args);
             case "remove" -> remove(sender,args);
             case "fill" -> changeFill(sender,args);
+            case "lock" -> changeLock(sender,args);
             case "model" -> changeModel(sender,args);
             case "models" -> sender.sendMessage("§bModels: §f"+String.join(", ",models.installed()));
             case "status" -> {
@@ -226,6 +245,7 @@ public final class HoloMapPlugin extends JavaPlugin implements CommandExecutor, 
         sender.sendMessage("§f/holomap model <id> <name> §7switch model or animation");
         sender.sendMessage("§f/holomap remove <id> §7remove only this display's frames");
         sender.sendMessage("§f/holomap fill <id> [solid|shell|empty] §7change the blocks in an existing cube");
+        sender.sendMessage("§f/holomap lock <id> [on|off] §7control player interaction with the frames");
         sender.sendMessage("§f/holomap models §7list folders, demo model included");
         sender.sendMessage("§f/holomap reload §7reload OBJ files and config");
         sender.sendMessage("§f/holomap status §7check GPU and OBJ preparation status");
@@ -317,12 +337,14 @@ public final class HoloMapPlugin extends JavaPlugin implements CommandExecutor, 
             throw new IllegalArgumentException("Invalid cube-material: choose AIR or a solid block.");
         CubeFill fillMode=CubeFill.parse(getConfig().getString("cube-fill","shell"));
         boolean inward=getConfig().getBoolean("cube-inward",true)&&(fillMode==CubeFill.EMPTY||isTransparent(material));
+        boolean backingOutside=inward&&!material.isAir();
+        int margin=backingOutside?1:0;
         boolean glow=getConfig().getBoolean("cube-glow",true);
-        // Require empty volume + all six exterior face-neighbor layers.
+        // Reserve the display space, adjacent frame cells and generated backing.
         for(int x=-1;x<=width;x++)for(int y=-1;y<=height;y++)for(int z=-1;z<=depth;z++) {
             boolean core=x>=0&&x<width&&y>=0&&y<height&&z>=0&&z<depth;
             int outside=(x<0||x>=width?1:0)+(y<0||y>=height?1:0)+(z<0||z>=depth?1:0);
-            if(!core&&outside!=1)continue;
+            if(!core&&outside!=1&&!fillMode.contains(x,y,z,width,height,depth,margin))continue;
             Block b=world.getBlockAt(bx+x,by+y,bz+z);
             if(!b.isEmpty())throw new IllegalArgumentException("Prism needs empty space at "+b.getX()+","+b.getY()+","+b.getZ());
             requireNoFrame(b);
@@ -334,8 +356,8 @@ public final class HoloMapPlugin extends JavaPlugin implements CommandExecutor, 
         List<Block> blocks=new ArrayList<>();
         List<UUID> createdFrames=new ArrayList<>();
         try {
-            if(!material.isAir())for(int x=0;x<width;x++)for(int y=0;y<height;y++)for(int z=0;z<depth;z++) {
-                if(!fillMode.contains(x,y,z,width,height,depth))continue;
+            if(!material.isAir())for(int x=-margin;x<width+margin;x++)for(int y=-margin;y<height+margin;y++)for(int z=-margin;z<depth+margin;z++) {
+                if(!fillMode.contains(x,y,z,width,height,depth,margin))continue;
                 Block b=world.getBlockAt(bx+x,by+y,bz+z);
                 b.setType(material,false);blocks.add(b);
             }
@@ -344,8 +366,10 @@ public final class HoloMapPlugin extends JavaPlugin implements CommandExecutor, 
                 int fw=face.tileWidth(width,height,depth),fh=face.tileHeight(width,height,depth);
                 for(int y=0;y<fh;y++)for(int x=0;x<fw;x++) {
                     int[] offset=face.support(width,height,depth,x,y,inward);
-                    Block support=world.getBlockAt(bx+offset[0],by+offset[1],bz+offset[2]);
-                    Block anchor=inward?support:support.getRelative(normal);
+                    Block edge=world.getBlockAt(bx+offset[0],by+offset[1],bz+offset[2]);
+                    // Inward frames occupy the edge of the map box. The block
+                    // behind them is one cell outward, in the backing layer.
+                    Block anchor=inward?edge:edge.getRelative(normal);
                     MapView map=Bukkit.createMap(world);
                     maps.get(face).add(map.getId());
                     ItemFrame frame=spawnFrame(anchor,normal,map,glow);
@@ -354,7 +378,7 @@ public final class HoloMapPlugin extends JavaPlugin implements CommandExecutor, 
                 }
             }
             CubeDisplay cube=new CubeDisplay(this,id,world,bx,by,bz,width,height,depth,
-                    name,material.name(),inward,fillMode,maps,frames);
+                    name,material.name(),inward,fillMode,backingOutside,maps,frames);
             cubes.put(id,cube);cube.installRenderers();writeDisplays();
             sender.sendMessage("§aHoloMap prism #"+id+" created ("+width+"x"+height+"x"+depth+", "+cube.mapCount()+" maps). Walk around all six faces.");
         }catch(Exception ex){
@@ -378,28 +402,34 @@ public final class HoloMapPlugin extends JavaPlugin implements CommandExecutor, 
         if(cube==null)throw new IllegalArgumentException("Cube not found: "+args[1]);
         CubeFill next=CubeFill.parse(args.length==3?args[2]:getConfig().getString("cube-fill","shell"));
         CubeFill previous=cube.fillMode();
-        if(next==previous) {
+        Material material=Material.matchMaterial(cube.blockMaterial);
+        if(material==null)throw new IllegalArgumentException("Unknown cube material: "+cube.blockMaterial);
+        boolean hadOutsideBacking=cube.backingOutside();
+        boolean outsideBacking=cube.inward&&!material.isAir();
+        if(next==previous&&outsideBacking==hadOutsideBacking) {
             sender.sendMessage("§aCube #"+cube.id+" already uses fill "+next.key()+".");
             return;
         }
-        Material material=Material.matchMaterial(cube.blockMaterial);
-        if(material==null)throw new IllegalArgumentException("Unknown cube material: "+cube.blockMaterial);
         if(cube.inward&&next!=CubeFill.EMPTY&&!isTransparent(material)) {
             throw new IllegalArgumentException("Opaque blocks would hide the inward projection.");
         }
 
         List<BlockState> added=new ArrayList<>();
         List<BlockState> cleared=new ArrayList<>();
+        int oldMargin=hadOutsideBacking?1:0;
+        int newMargin=outsideBacking?1:0;
+        int margin=Math.max(oldMargin,newMargin);
         if(!material.isAir()) {
-            for(int x=0;x<cube.width;x++)for(int y=0;y<cube.height;y++)for(int z=0;z<cube.depth;z++) {
-                boolean wasFilled=previous.contains(x,y,z,cube.width,cube.height,cube.depth);
-                boolean willBeFilled=next.contains(x,y,z,cube.width,cube.height,cube.depth);
+            for(int x=-margin;x<cube.width+margin;x++)for(int y=-margin;y<cube.height+margin;y++)for(int z=-margin;z<cube.depth+margin;z++) {
+                boolean wasFilled=previous.contains(x,y,z,cube.width,cube.height,cube.depth,oldMargin);
+                boolean willBeFilled=next.contains(x,y,z,cube.width,cube.height,cube.depth,newMargin);
                 if(wasFilled==willBeFilled)continue;
                 Block block=cube.world.getBlockAt(cube.baseX+x,cube.baseY+y,cube.baseZ+z);
                 if(willBeFilled) {
                     if(!block.isEmpty()) {
                         throw new IllegalArgumentException("Fill is obstructed at "+block.getX()+","+block.getY()+","+block.getZ());
                     }
+                    if(!CubeFill.SOLID.contains(x,y,z,cube.width,cube.height,cube.depth,0))requireNoFrame(block);
                     added.add(block.getState());
                 } else if(block.getType()==material) {
                     cleared.add(block.getState());
@@ -410,10 +440,10 @@ public final class HoloMapPlugin extends JavaPlugin implements CommandExecutor, 
         try {
             for(BlockState state:cleared)state.getBlock().setType(Material.AIR,false);
             for(BlockState state:added)state.getBlock().setType(material,false);
-            cube.setFillMode(next);
+            cube.setFill(next,outsideBacking);
             writeDisplays();
         } catch(IOException|RuntimeException ex) {
-            cube.setFillMode(previous);
+            cube.setFill(previous,hadOutsideBacking);
             for(BlockState state:cleared)state.update(true,false);
             for(BlockState state:added)state.update(true,false);
             throw ex;
@@ -443,28 +473,76 @@ public final class HoloMapPlugin extends JavaPlugin implements CommandExecutor, 
         });
     }
 
+    private void changeLock(CommandSender sender,String[] args) {
+        if(args.length<2||args.length>3) {
+            throw new IllegalArgumentException("Usage: /holomap lock <id> [on|off]");
+        }
+        Boolean locked=null;
+        if(args.length==3) {
+            locked=switch(args[2].toLowerCase(Locale.ROOT)) {
+                case "on" -> true;
+                case "off" -> false;
+                default -> throw new IllegalArgumentException("Lock must be on or off.");
+            };
+        }
+        int id=Integer.parseInt(args[1]);
+        Display display=displays.get(id);
+        CubeDisplay cube=cubes.get(id);
+        if(display==null&&cube==null)throw new IllegalArgumentException("Display not found: "+id);
+        List<ItemFrame> frames=display!=null?loadFrames(display):loadFrames(cube);
+        if(frames.isEmpty())throw new IllegalArgumentException("No frames remain on display #"+id+".");
+        if(locked==null) {
+            long count=frames.stream().filter(ItemFrame::isFixed).count();
+            sender.sendMessage("§bDisplay #"+id+": "+count+"/"+frames.size()+" frames locked.");
+            return;
+        }
+        for(ItemFrame frame:frames) {
+            frame.setFixed(locked);
+            frame.setInvulnerable(locked);
+        }
+        sender.sendMessage("§aDisplay #"+id+" lock "+(locked?"on":"off")+" ("+frames.size()+" frames).");
+    }
+
+    private List<ItemFrame> loadFrames(CubeDisplay cube) {
+        // Force the frame entities to load before resolving their persisted UUIDs.
+        for(CubeGeometry.Face face:CubeGeometry.Face.values()) {
+            int width=face.tileWidth(cube.width,cube.height,cube.depth);
+            int height=face.tileHeight(cube.width,cube.height,cube.depth);
+            int outside=cube.inward?0:1;
+            for(int y=0;y<height;y++)for(int x=0;x<width;x++) {
+                int[] offset=face.support(cube.width,cube.height,cube.depth,x,y,cube.inward);
+                cube.world.getChunkAt((cube.baseX+offset[0]+outside*face.nx())>>4,
+                        (cube.baseZ+offset[2]+outside*face.nz())>>4).getEntities();
+            }
+        }
+        return itemFrames(cube.allFrames());
+    }
+
+    private List<ItemFrame> loadFrames(Display display) {
+        Vector right=display.right();
+        for(int x=0;x<display.width;x++) {
+            int bx=display.supportX+display.facing.getModX()+right.getBlockX()*x;
+            int bz=display.supportZ+display.facing.getModZ()+right.getBlockZ()*x;
+            display.world.getChunkAt(bx>>4,bz>>4).getEntities();
+        }
+        return itemFrames(display.frameIds);
+    }
+
+    private List<ItemFrame> itemFrames(Collection<UUID> ids) {
+        return ids.stream().map(Bukkit::getEntity).filter(ItemFrame.class::isInstance).map(ItemFrame.class::cast).toList();
+    }
+
     private void remove(CommandSender sender,String[] args) {
         if(args.length<2)throw new IllegalArgumentException("/holomap remove <id>");
         int id=Integer.parseInt(args[1]);Display d=displays.get(id);
         if(d==null){
             CubeDisplay cube=cubes.get(id);
             if(cube==null)throw new IllegalArgumentException("No display or cube with id "+id);
-            // UUID lookups require the corresponding chunks to be loaded.
-            for(CubeGeometry.Face face:CubeGeometry.Face.values())
-                for(int y=0;y<face.tileHeight(cube.width,cube.height,cube.depth);y++)
-                for(int x=0;x<face.tileWidth(cube.width,cube.height,cube.depth);x++){
-                int[] p=face.support(cube.width,cube.height,cube.depth,x,y,cube.inward);
-                int outside=cube.inward?0:1;
-                cube.world.getChunkAt((cube.baseX+p[0]+outside*face.nx())>>4,
-                        (cube.baseZ+p[2]+outside*face.nz())>>4).getEntities();
-            }
-            for(UUID uuid:cube.allFrames()){
-                Entity entity=Bukkit.getEntity(uuid);
-                if(entity instanceof ItemFrame)entity.remove();
-            }
+            for(ItemFrame frame:loadFrames(cube))frame.remove();
             Material blockMaterial=Material.matchMaterial(cube.blockMaterial);
-            if(blockMaterial!=null&&!blockMaterial.isAir())for(int x=0;x<cube.width;x++)for(int y=0;y<cube.height;y++)for(int z=0;z<cube.depth;z++){
-                if(!cube.fillMode().contains(x,y,z,cube.width,cube.height,cube.depth))continue;
+            int margin=cube.backingOutside()?1:0;
+            if(blockMaterial!=null&&!blockMaterial.isAir())for(int x=-margin;x<cube.width+margin;x++)for(int y=-margin;y<cube.height+margin;y++)for(int z=-margin;z<cube.depth+margin;z++){
+                if(!cube.fillMode().contains(x,y,z,cube.width,cube.height,cube.depth,margin))continue;
                 Block block=cube.world.getBlockAt(cube.baseX+x,cube.baseY+y,cube.baseZ+z);
                 if(block.getType()==blockMaterial)block.setType(Material.AIR,false);
             }
@@ -472,14 +550,7 @@ public final class HoloMapPlugin extends JavaPlugin implements CommandExecutor, 
             sender.sendMessage("§aRemoved HoloMap prism #"+id+"; blocks changed since placement were preserved.");
             return;
         }
-        // Ensure supporting chunks are present so Bukkit can resolve persisted UUIDs.
-        Vector r=d.right();
-        for(int y=0;y<d.height;y++)for(int x=0;x<d.width;x++) {
-            int bx=d.supportX+d.facing.getModX()+r.getBlockX()*x;
-            int bz=d.supportZ+d.facing.getModZ()+r.getBlockZ()*x;
-            d.world.getChunkAt(bx>>4,bz>>4).getEntities();
-        }
-        for(UUID uuid:d.frameIds){Entity e=Bukkit.getEntity(uuid);if(e instanceof ItemFrame)e.remove();}
+        for(ItemFrame frame:loadFrames(d))frame.remove();
         d.uninstallRenderers();displays.remove(id);saveDisplays();
         sender.sendMessage("§aRemoved HoloMap #"+id+".");
     }
@@ -496,7 +567,7 @@ public final class HoloMapPlugin extends JavaPlugin implements CommandExecutor, 
         sender.sendMessage("§aDisplay #"+id+" uses "+args[2]);
     }
     @Override public List<String> onTabComplete(CommandSender sender,Command command,String alias,String[] args) {
-        if(args.length==1)return matches(args[0],List.of("help","place","cube","create","list","models","model","fill","remove","reload","status"));
+        if(args.length==1)return matches(args[0],List.of("help","place","cube","create","list","models","model","fill","lock","remove","reload","status"));
         if(args[0].equalsIgnoreCase("place")) {
             if(args.length==2 || args.length==3)return matches(args[args.length-1],List.of("1","2","3"));
             if(args.length==4)return matches(args[3],models.installed());
@@ -506,13 +577,14 @@ public final class HoloMapPlugin extends JavaPlugin implements CommandExecutor, 
                 return matches(args[args.length-1],List.of("1","2","3","4","5","6","7","8"));
             if(args.length==5)return matches(args[4],models.installed());
         }
-        if((args[0].equalsIgnoreCase("remove")||args[0].equalsIgnoreCase("model"))&&args.length==2){
+        if((args[0].equalsIgnoreCase("remove")||args[0].equalsIgnoreCase("model")||args[0].equalsIgnoreCase("lock"))&&args.length==2){
             List<String> ids=new ArrayList<>();
             for(int id:displays.keySet())ids.add(String.valueOf(id));
             for(int id:cubes.keySet())ids.add(String.valueOf(id));
             return matches(args[1],ids);
         }
         if(args[0].equalsIgnoreCase("model")&&args.length==3)return matches(args[2],models.installed());
+        if(args[0].equalsIgnoreCase("lock")&&args.length==3)return matches(args[2],List.of("on","off"));
         if(args[0].equalsIgnoreCase("fill")) {
             if(args.length==2)return matches(args[1],cubes.keySet().stream().map(String::valueOf).toList());
             if(args.length==3)return matches(args[2],Arrays.stream(CubeFill.values()).map(CubeFill::key).toList());

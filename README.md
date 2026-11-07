@@ -1,4 +1,4 @@
-# HoloMapPerspective v0.7.1 — 内向き地図・GPU描画・最大60fps送信
+# HoloMapPerspective v0.7.2 — 内向き地図・GPU描画・最大60fps送信
 
 アップロードされた **v0.4.0** を基礎として変更した、Minecraft Java **26.3 / Paper 26.3 / Java 25** 用プラグインのソースです。クライアントMODは不要。正面1面の表示と、6面すべてにプレイヤー別視差を反映した立方体・直方体表示に対応します。
 
@@ -9,7 +9,7 @@ GPU版はPaperと同じPCのPython 3・ModernGL・Pillowを使います。OpenGL
 1. **JDK 25** と Python 3 をインストール。NVIDIA/AMD/Intel のGPUドライバを最新版に更新。
 2. PowerShellで `py -3 -m pip install -r gpu-requirements.txt` を実行。`python -m pip ...` でも可。
 3. `JAVA_HOME` にJDK 25のインストール先を設定し、ソースのフォルダで `.\gradlew.bat build` を実行。
-4. `build/libs/HoloMapPerspective-0.7.1.jar` をPaper 26.3サーバーの `plugins` フォルダへ配置し、旧版のJARをplugins外へ退避。サーバーを完全再起動。
+4. `build/libs/HoloMapPerspective-0.7.2.jar` をPaper 26.3サーバーの `plugins` フォルダへ配置し、旧版のJARをplugins外へ退避。サーバーを完全再起動。
 5. 起動時に `plugins/HoloMapPerspective/gpu/renderer.py` が同梱版へ更新される。`config.yml`の`gpu-python-command`が利用可能なPythonコマンド（例:`python`、`py -3`）であることを確認。自分で変更したGPUスクリプトは事前に保存する。
 6. `/holomap cube 1 1 1 demo` を実行。`/holomap status` でモデルの準備状況と実際のOpenGL実行環境を確認する。
 
@@ -32,6 +32,8 @@ GPU方式では移動イベントで視点を更新し、描画時間と通信�
 /holomap status
 /holomap reload
 /holomap fill 1 shell
+/holomap lock 1 off
+/holomap lock 1 on
 /holomap remove 1
 ```
 
@@ -83,11 +85,13 @@ max-prism-maps: 96
 
 `cube-inward` と `cube-glow` は新しく作る直方体に適用します。内向き投影には `cube-material: AIR` または `BARRIER` を使ってください。外向きの地図で作るには `cube-inward: false` を設定します。
 
-`cube-fill` は `cube-material` のブロックを置く範囲です。初期値の `shell` は6面の外周1ブロック、`solid` は全体、`empty` は額縁だけを使います。幅・高さ・奥行きのうち1辺でも2以下の場合、`shell` では全ブロックが外周になります。
+`cube-fill` は `cube-material` のブロックを置く範囲です。初期値の `shell` は6面の外周1ブロック、`solid` は全体、`empty` は額縁だけを使います。
 
-内向きの場合、額縁は最外周のブロックと同じマスに固定されます。地図面は箱の外側の境界から約0.008ブロック内側にあり、箱の中央を向きます。
+内向きの `shell` では、地図の範囲より1マス外側にバリアなどの支えを作り、その内側面に透明な額縁を取り付けます。2×4×2を指定すると、地図の範囲が2×4×2、バリア込みの外寸が4×6×4になります。
 
-設定を変更したら `/holomap reload` で読み込みます。既存の表示には `/holomap fill <id>` で設定を適用できます。個別に変えるときは `/holomap fill <id> empty` のように指定します。設置済みの額縁と地図IDを使ったまま、ブロックの配置だけを切り替えます。
+設定を変更したら `/holomap reload` で読み込みます。既存の表示には `/holomap fill <id>` で設定を適用できます。旧版の内向き表示に `/holomap fill <id> shell` を実行すると、額縁と地図IDを保ったまま支えを外側へ移せます。
+
+額縁は初期状態で保護されます。`/holomap lock <id> off` でプレイヤーによる回転、地図の取り外し、額縁の破壊を許可し、`on` で保護に戻します。`/holomap lock <id>` で現在の状態を確認できます。
 
 `max-obj-bytes` は**OBJ原本の容量**、`max-triangles` は**三角形換算ポリゴン数**の上限です。設定を増やせば、読み込み可能なモデルは増えますが、VRAM消費やレンダリング時間も増加します。600MBのOBJも容量上限には収まりますが、ポリゴン数上限は別に確認が必要です。`/holomap status` で `FAILED` の理由を確認できます。
 

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.2
+- Mount inward maps on the interior faces of backing blocks outside the map box.
+- Move the backing of an existing inward cube with `/holomap fill`.
+- Toggle player rotation, item removal and frame breaking with `/holomap lock`.
+
 ## 0.7.1
 - Configure solid, shell, or empty block placement independently of the cube's material and map orientation.
 - Change the fill of a placed cube with `/holomap fill` while retaining its frames and map IDs.

@@ -5,7 +5,11 @@ import dev.openai.holomap.Display;
 import dev.openai.holomap.CubeGeometry.Face;
 import org.bukkit.*;
 import org.bukkit.block.BlockFace;
+import org.bukkit.damage.DamageSource;
+import org.bukkit.damage.DamageType;
 import org.bukkit.entity.*;
+import org.bukkit.event.hanging.HangingBreakByEntityEvent;
+import org.bukkit.event.hanging.HangingBreakEvent;
 import org.bukkit.inventory.meta.MapMeta;
 import org.bukkit.map.*;
 import org.bukkit.plugin.java.JavaPlugin;
@@ -194,12 +198,37 @@ public final class HoloMapVerifier extends JavaPlugin {
         plugin.getConfig().set("cube-material","BARRIER");
         plugin.getConfig().set("cube-fill","shell");
         plugin.getConfig().set("cube-inward",true);
-        CubeDisplay cube=create("232 128 232 3 3 3 demo");
+        CubeDisplay cube=create("232 128 232 2 4 2 demo");
         Set<UUID> frames=cube.allFrames();
-        var corner=world.getBlockAt(232,128,232);
-        var center=world.getBlockAt(233,129,233);
-        check(cube.inward&&cube.fillMode()==CubeFill.SHELL&&corner.getType()==Material.BARRIER&&center.isEmpty(),
-                "shell creates an inward cube with only its boundary filled");
+        var corner=world.getBlockAt(231,127,231);
+        var center=world.getBlockAt(232,129,232);
+        check(cube.inward&&cube.backingOutside()&&cube.fillMode()==CubeFill.SHELL
+                &&corner.getType()==Material.BARRIER&&center.isEmpty()&&frames.size()==40,
+                "2x4x2 inward map box fits in an outer 4x6x4 shell");
+        for(UUID id:frames) {
+            ItemFrame frame=(ItemFrame)Bukkit.getEntity(id);
+            var anchor=frame.getLocation().getBlock();
+            check(frame instanceof GlowItemFrame&&!frame.isVisible()&&frame.isFixed()
+                    &&frame.getItem().getType()==Material.FILLED_MAP,"visible map in an invisible locked glow frame");
+            check(anchor.isEmpty()&&anchor.getRelative(frame.getFacing().getOppositeFace()).getType()==Material.BARRIER,
+                    "frame occupies air with a barrier directly behind it");
+        }
+        ItemFrame sample=(ItemFrame)Bukkit.getEntity(frames.iterator().next());
+        Player player=new Viewer(cube.faceCenter(Face.NORTH)).player;
+        DamageSource attack=DamageSource.builder(DamageType.PLAYER_ATTACK).build();
+        HangingBreakByEntityEvent lockedBreak=new HangingBreakByEntityEvent(sample,player,attack);
+        Bukkit.getPluginManager().callEvent(lockedBreak);
+        check(lockedBreak.isCancelled(),"locked frame is protected from player breaking");
+        command("lock "+cube.id+" off");
+        for(UUID id:frames) {
+            ItemFrame frame=(ItemFrame)Bukkit.getEntity(id);
+            check(!frame.isFixed()&&!frame.isInvulnerable(),"unlock applies to every frame");
+            Object handle=frame.getClass().getMethod("getHandle").invoke(frame);
+            check((boolean)handle.getClass().getMethod("survives").invoke(handle),"unlocked frame has valid vanilla backing");
+        }
+        HangingBreakByEntityEvent unlockedBreak=new HangingBreakByEntityEvent(sample,player,attack);
+        Bukkit.getPluginManager().callEvent(unlockedBreak);
+        check(!unlockedBreak.isCancelled(),"unlocked frame allows player breaking");
         center.setType(Material.BARRIER,false);
         command("fill "+cube.id+" solid");
         check(cube.fillMode()==CubeFill.SHELL,"cannot take ownership of a barrier added inside the shell");
@@ -207,7 +236,10 @@ public final class HoloMapVerifier extends JavaPlugin {
         command("fill "+cube.id+" empty");
         check(cube.fillMode()==CubeFill.EMPTY&&center.getType()==Material.BARRIER&&corner.getType()==Material.DIAMOND_BLOCK,
                 "empty mode preserves both a player barrier and a changed boundary block");
-        check(world.getBlockAt(232,128,233).isEmpty(),"empty clears a generated shell block");
+        check(world.getBlockAt(232,128,231).isEmpty(),"empty clears a generated shell block");
+        HangingBreakEvent physicsBreak=new HangingBreakEvent(sample,HangingBreakEvent.RemoveCause.PHYSICS);
+        Bukkit.getPluginManager().callEvent(physicsBreak);
+        check(physicsBreak.isCancelled(),"clearing backing retains an unlocked map frame");
         corner.setType(Material.AIR,false);
         center.setType(Material.AIR,false);
         plugin.getConfig().set("cube-fill","solid");
@@ -215,13 +247,17 @@ public final class HoloMapVerifier extends JavaPlugin {
         check(cube.fillMode()==CubeFill.SOLID&&center.getType()==Material.BARRIER,"command without a mode applies the config");
         command("fill "+cube.id+" shell");
         check(center.isEmpty()&&frames.equals(cube.allFrames()),"hollowing a solid cube retains all frame UUIDs");
-        for(UUID id:frames)check(Bukkit.getEntity(id) instanceof GlowItemFrame,"inward frame survives changing fill");
+        command("lock "+cube.id+" on");
+        for(UUID id:frames) {
+            ItemFrame frame=(ItemFrame)Bukkit.getEntity(id);
+            check(frame.isFixed()&&frame.isInvulnerable(),"relock protects every surviving frame");
+        }
         center.setType(Material.BARRIER,false);
         command("remove "+cube.id);
         check(center.getType()==Material.BARRIER&&corner.isEmpty(),"removal clears only the cube's shell");
         center.setType(Material.AIR,false);
         plugin.getConfig().set("cube-material","AIR");
-        results.add("PASS: shell, empty, refilling, frame preservation, and block ownership");
+        results.add("PASS: inward backing, invisible filled maps, lock toggles, shell changes, and block ownership");
     }
     private Display createFlat() throws Exception {
         for(int x=0;x<2;x++)for(int y=0;y<2;y++)world.getBlockAt(192-x,128+y,192).setType(Material.STONE,false);

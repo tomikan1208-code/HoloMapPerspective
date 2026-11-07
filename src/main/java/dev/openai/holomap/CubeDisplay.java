@@ -18,6 +18,7 @@ public final class CubeDisplay {
     public final String blockMaterial;
     public final boolean inward;
     private CubeFill fillMode;
+    private boolean backingOutside;
     public String model;
     private final HoloMapPlugin plugin;
     public final EnumMap<CubeGeometry.Face,List<Integer>> mapIds;
@@ -38,12 +39,14 @@ public final class CubeDisplay {
 
     public CubeDisplay(HoloMapPlugin plugin,int id,World world,int baseX,int baseY,int baseZ,
                        int width,int height,int depth,String model,String blockMaterial,boolean inward,CubeFill fillMode,
+                       boolean backingOutside,
                        Map<CubeGeometry.Face,List<Integer>> maps,
                        Map<CubeGeometry.Face,List<UUID>> frames) {
         this.plugin=plugin;this.id=id;this.world=world;
         this.baseX=baseX;this.baseY=baseY;this.baseZ=baseZ;
         this.width=width;this.height=height;this.depth=depth;
         this.model=model;this.blockMaterial=blockMaterial;this.inward=inward;this.fillMode=fillMode;
+        this.backingOutside=inward&&backingOutside;
         mapIds=new EnumMap<>(CubeGeometry.Face.class);
         frameIds=new EnumMap<>(CubeGeometry.Face.class);
         for(CubeGeometry.Face face:CubeGeometry.Face.values()) {
@@ -53,7 +56,11 @@ public final class CubeDisplay {
     }
 
     public CubeFill fillMode() {return fillMode;}
-    void setFillMode(CubeFill fillMode) {this.fillMode=fillMode;}
+    public boolean backingOutside() {return backingOutside;}
+    void setFill(CubeFill fillMode, boolean backingOutside) {
+        this.fillMode=fillMode;
+        this.backingOutside=backingOutside;
+    }
 
     public Location faceCenter(CubeGeometry.Face f) {
         CubeGeometry.Face basis=f.screenBasis(inward);
@@ -211,6 +218,7 @@ public final class CubeDisplay {
         out.set("model",model);out.set("block-material",blockMaterial);
         out.set("inward",inward);
         out.set("fill",fillMode.key());
+        out.set("backing-outside",backingOutside);
         for(CubeGeometry.Face face:CubeGeometry.Face.values()) {
             out.set("maps."+face.name(),mapIds.get(face));
             out.set("frames."+face.name(),frameIds.get(face).stream().map(UUID::toString).toList());
