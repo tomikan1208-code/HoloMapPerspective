@@ -1,7 +1,7 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
 cd /d "%~dp0"
-title HoloMapPerspective v0.7.0 - BUILD (stays open)
+title HoloMapPerspective v0.7.1 - BUILD (stays open)
 
 REM Optional: Specify the JDK 25 installation folder here if PATH uses Java 8.
 REM Example: set "JDK25_HOME=C:\Program Files\Eclipse Adoptium\jdk-25.0.1.8-hotspot"
@@ -23,7 +23,7 @@ if defined JDK25_HOME (
 set "BUILD_LOG=%~dp0build_log_FIX2.txt"
 set "REASON=Unknown failure"
 
->"%BUILD_LOG%" echo HoloMapPerspective v0.7.0 build log
+>"%BUILD_LOG%" echo HoloMapPerspective v0.7.1 build log
 >>"%BUILD_LOG%" echo Folder: %CD%
 >>"%BUILD_LOG%" echo JAVA_HOME: !JAVA_HOME!
 
@@ -106,14 +106,14 @@ if not "!GRADLE_RESULT!"=="0" (
   set "REASON=Gradle exited with code !GRADLE_RESULT!. See build_log_FIX2.txt."
   goto :fail
 )
-if not exist "build\libs\HoloMapPerspective-0.7.0.jar" (
-  set "REASON=Gradle returned 0 but build\libs\HoloMapPerspective-0.7.0.jar was not found."
+if not exist "build\libs\HoloMapPerspective-0.7.1.jar" (
+  set "REASON=Gradle returned 0 but build\libs\HoloMapPerspective-0.7.1.jar was not found."
   goto :fail
 )
 
 echo ============================================================
 echo [SUCCESS] JAR was verified:
-echo %CD%\build\libs\HoloMapPerspective-0.7.0.jar
+echo %CD%\build\libs\HoloMapPerspective-0.7.1.jar
 echo ============================================================
 >>"%BUILD_LOG%" echo [SUCCESS] JAR exists.
 goto :finish

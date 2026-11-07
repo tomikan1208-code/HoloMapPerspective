@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.1
+- Configure solid, shell, or empty block placement independently of the cube's material and map orientation.
+- Change the fill of a placed cube with `/holomap fill` while retaining its frames and map IDs.
+
 ## 0.7.0
 - Project onto inward-facing maps on new clear prisms for better detail at close range.
 - Use invisible glow frames to preserve colors in low light.

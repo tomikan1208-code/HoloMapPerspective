@@ -186,8 +186,42 @@ public final class HoloMapVerifier extends JavaPlugin {
         world.getBlockAt(224,128,224).setType(Material.AIR,false);
         plugin.getConfig().set("cube-material","AIR");
         results.add("PASS: optional solid backing and modified-block protection");
+        verifyFillChanges();
         getConfig().set("phase",2);saveConfig();
         writeReport("ALL_PASS");
+    }
+    private void verifyFillChanges() throws Exception {
+        plugin.getConfig().set("cube-material","BARRIER");
+        plugin.getConfig().set("cube-fill","shell");
+        plugin.getConfig().set("cube-inward",true);
+        CubeDisplay cube=create("232 128 232 3 3 3 demo");
+        Set<UUID> frames=cube.allFrames();
+        var corner=world.getBlockAt(232,128,232);
+        var center=world.getBlockAt(233,129,233);
+        check(cube.inward&&cube.fillMode()==CubeFill.SHELL&&corner.getType()==Material.BARRIER&&center.isEmpty(),
+                "shell creates an inward cube with only its boundary filled");
+        center.setType(Material.BARRIER,false);
+        command("fill "+cube.id+" solid");
+        check(cube.fillMode()==CubeFill.SHELL,"cannot take ownership of a barrier added inside the shell");
+        corner.setType(Material.DIAMOND_BLOCK,false);
+        command("fill "+cube.id+" empty");
+        check(cube.fillMode()==CubeFill.EMPTY&&center.getType()==Material.BARRIER&&corner.getType()==Material.DIAMOND_BLOCK,
+                "empty mode preserves both a player barrier and a changed boundary block");
+        check(world.getBlockAt(232,128,233).isEmpty(),"empty clears a generated shell block");
+        corner.setType(Material.AIR,false);
+        center.setType(Material.AIR,false);
+        plugin.getConfig().set("cube-fill","solid");
+        command("fill "+cube.id);
+        check(cube.fillMode()==CubeFill.SOLID&&center.getType()==Material.BARRIER,"command without a mode applies the config");
+        command("fill "+cube.id+" shell");
+        check(center.isEmpty()&&frames.equals(cube.allFrames()),"hollowing a solid cube retains all frame UUIDs");
+        for(UUID id:frames)check(Bukkit.getEntity(id) instanceof GlowItemFrame,"inward frame survives changing fill");
+        center.setType(Material.BARRIER,false);
+        command("remove "+cube.id);
+        check(center.getType()==Material.BARRIER&&corner.isEmpty(),"removal clears only the cube's shell");
+        center.setType(Material.AIR,false);
+        plugin.getConfig().set("cube-material","AIR");
+        results.add("PASS: shell, empty, refilling, frame preservation, and block ownership");
     }
     private Display createFlat() throws Exception {
         for(int x=0;x<2;x++)for(int y=0;y<2;y++)world.getBlockAt(192-x,128+y,192).setType(Material.STONE,false);
