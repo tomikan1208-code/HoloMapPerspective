@@ -13,6 +13,7 @@ public final class GpuEngine implements AutoCloseable {
     private static final long ACTIVE_NANOS=250_000_000L;
     private static final long REST_NANOS=80_000_000L;
     private static final int MOVING_PIXEL_BUDGET=800_000;
+    private static final String PROTOCOL="HMAP-IPC3 ";
     public record Request(String face,int widthPx,int heightPx,double eyeX,double eyeY,double eyeZ,
                           int widthTiles,int heightTiles,double scale,double depth,CubeGeometry.Face basis,
                           boolean visible) {}
@@ -40,16 +41,19 @@ public final class GpuEngine implements AutoCloseable {
         int rateFrames;
         volatile double renderRate;
     }
-    private record Submission(long tick,Models.Asset asset,ObjBinaryCache.Frame mesh,List<Request> requests,
+    private record Submission(long tick,Models.Asset asset,Models.Sample mesh,List<Request> requests,
                               long sampledAt,long previousAt,List<Request> previous,long revision,
                               boolean moving,boolean abrupt) {}
+    private record Region(int x,int y,int width,int height) {}
+    private record Batch(long queueNanos,long renderNanos,long ioNanos,long paletteNanos,long rgbaBytes,int culledFaces) {}
     private final HoloMapPlugin plugin;
     private final ThreadPoolExecutor jobs=new ThreadPoolExecutor(1,1,0L,TimeUnit.SECONDS,
             new ArrayBlockingQueue<>(48),r->{Thread t=new Thread(r,"HoloMap-GPU-IO");t.setDaemon(true);return t;},
             new ThreadPoolExecutor.AbortPolicy());
     private final ConcurrentHashMap<String,Frame> cache=new ConcurrentHashMap<>();
-    // Only the GPU worker touches this table. Zero is an uncomputed opaque color.
+    // Only the GPU worker touches these buffers. Zero is an uncomputed opaque color.
     private final byte[] colors=new byte[1<<24];
+    private byte[] rgba=new byte[0];
     private final ConcurrentHashMap<Integer,byte[]> blanks=new ConcurrentHashMap<>();
     private final AtomicLong completedScenes=new AtomicLong();
     private final AtomicLong deliveredScenes=new AtomicLong();
@@ -60,7 +64,7 @@ public final class GpuEngine implements AutoCloseable {
     private volatile int targetFps,animationFps;
     private volatile double viewDistanceSquared;
     private final long animationStart=System.nanoTime();
-    private volatile double lastBatchMillis;
+    private volatile Batch lastBatch;
     private volatile String backendInfo="Not started";
     private Process process;
     private DataInputStream input;
@@ -70,14 +74,18 @@ public final class GpuEngine implements AutoCloseable {
 
     public GpuEngine(HoloMapPlugin plugin){this.plugin=plugin;configure();}
     public String status(){
+        Batch batch=lastBatch;
+        String timings=batch==null?"":String.format(Locale.ROOT,
+                "; last batch: %.1f ms (queue %.1f ms, GPU I/O %.1f ms, palette/scale %.1f ms, RGBA %.1f KiB, culled faces %d)",
+                batch.renderNanos()/1e6,batch.queueNanos()/1e6,batch.ioNanos()/1e6,batch.paletteNanos()/1e6,
+                batch.rgbaBytes()/1024.0,batch.culledFaces());
         String streams=cache.entrySet().stream().filter(e->e.getValue().delivery!=null&&e.getValue().latest!=null
                         &&System.nanoTime()-e.getValue().activeAt<ACTIVE_NANOS)
                 .map(e->"#"+e.getKey().split(":",2)[0]+":"+String.format(Locale.ROOT,"%.1f fps",e.getValue().renderRate))
                 .sorted().collect(java.util.stream.Collectors.joining(", "));
         return backendInfo+"; queued: "+jobs.getQueue().size()
             +"; target: "+targetFps+" fps; complete scenes: "+completedScenes.get()+"; sent bundles: "+deliveredScenes.get()
-            +"; superseded scenes: "+supersededScenes.get()
-            +"; last batch: "+String.format(Locale.ROOT,"%.1f ms",lastBatchMillis)+(streams.isEmpty()?"":"; streams: "+streams);}
+            +"; superseded scenes: "+supersededScenes.get()+timings+(streams.isEmpty()?"":"; streams: "+streams);}
     public void start(){jobs.execute(()->{try{ensureProcess();}catch(IOException ex){backendInfo="GPU ERROR: "+ex.getMessage();plugin.getLogger().warning(backendInfo);}});}
     private void configure() {
         targetFps=Math.max(1,Math.min(60,plugin.getConfig().getInt("render-fps",20)));
@@ -109,7 +117,7 @@ public final class GpuEngine implements AutoCloseable {
             Submission sample=frame.latest;
             Delivery delivery=frame.delivery;
             if(delivery==null||sample==null||now<frame.nextFrameAt||now-frame.activeAt>=ACTIVE_NANOS||!delivery.ready())return;
-            if(sample==frame.rendered&&!sample.moving()&&sample.asset().frames().size()==1)return;
+            if(sample==frame.rendered&&!sample.moving()&&sample.asset().frameCount()==1)return;
             submit(key,frame,true);
         });
     }
@@ -143,7 +151,7 @@ public final class GpuEngine implements AutoCloseable {
         long revision=prior==null?0:prior.revision();
         if(snap||turn||!moving)revision++;
         if(returning)delivery.reset();
-        frame.latest=new Submission(tick,asset,asset.at(tick,Math.min(20,animationFps)),List.copyOf(requests),now,
+        frame.latest=new Submission(tick,asset,asset.atTick(tick,Math.min(20,animationFps)),List.copyOf(requests),now,
                 snap?0:prior.sampledAt(),snap?List.of():prior.requests(),revision,moving&&!snap,turn);
         if((snap||turn)&&delivery.ready())submit(key,frame,true);
     }
@@ -162,7 +170,7 @@ public final class GpuEngine implements AutoCloseable {
         if(asset==null)return previous==null?empty:previous;
         // A queued job picks up the newest pose when it starts, rather than an old position.
         Submission older=frame.latest;
-        if(older==null||older.tick()!=tick)frame.latest=new Submission(tick,asset,asset.at(tick,Math.min(20,animationFps)),
+        if(older==null||older.tick()!=tick)frame.latest=new Submission(tick,asset,asset.atTick(tick,Math.min(20,animationFps)),
                 List.copyOf(requests),System.nanoTime(),0,List.of(),0,false,false);
         if(frame.pending.get()||tick-frame.tick<interval)return previous==null?empty:previous;
         frame.tick=tick;
@@ -178,6 +186,7 @@ public final class GpuEngine implements AutoCloseable {
             frame.nextFrameAt=(due!=0&&now>=due&&now-due<period?due:now)+period;
         }
         try {
+            long enqueued=System.nanoTime();
             jobs.execute(()->{
                 long start=System.nanoTime();
                 try {
@@ -189,19 +198,32 @@ public final class GpuEngine implements AutoCloseable {
                     long lead=Math.min(25_000_000L,frame.renderNanos)+Math.min(20,Math.max(0,frame.ping)/2)*1_000_000L;
                     List<Request> requests=streaming?predicted(captured,start+lead):captured.requests();
                     int stride=streaming&&captured.moving()?motionStride(requests):1;
-                    ObjBinaryCache.Frame mesh=streaming?captured.asset().frames().get((int)(
-                            ((System.nanoTime()-animationStart)/1_000_000_000.0*animationFps)%captured.asset().frames().size())):captured.mesh();
+                    Models.Sample mesh=streaming?captured.asset().atSeconds(
+                            (System.nanoTime()-animationStart)/1_000_000_000.0,animationFps):captured.mesh();
+                    byte[] path=mesh.path().toAbsolutePath().toString().getBytes(StandardCharsets.UTF_8);
                     Map<String,byte[]> rendered=new LinkedHashMap<>();
+                    long ioNanos=0,paletteNanos=0,rgbaBytes=0;
+                    int culledFaces=0;
                     for(Request request:requests) {
                         if(streaming&&superseded(frame,captured))return;
-                        byte[] pixels;
-                        if(!request.visible())pixels=blank(request.widthPx()*request.heightPx());
-                        else {
-                            int w=request.widthPx()/stride,h=request.heightPx()/stride;
-                            byte[] rgba=process(mesh.cache().toAbsolutePath().toString(),request,captured.asset(),w,h);
-                            pixels=palette(rgba,w*h);
-                            if(stride>1)pixels=upscale(pixels,w,h,stride);
+                        if(!request.visible()) {
+                            rendered.put(request.face(),blank(request.widthPx()*request.heightPx()));
+                            continue;
                         }
+                        int w=request.widthPx()/stride,h=request.heightPx()/stride;
+                        long beforeRead=System.nanoTime();
+                        Region region=process(path,mesh.pose(),request,captured.asset(),w,h);
+                        long afterRead=System.nanoTime();
+                        ioNanos+=afterRead-beforeRead;
+                        if(region==null) {
+                            culledFaces++;
+                            rendered.put(request.face(),blank(request.widthPx()*request.heightPx()));
+                            continue;
+                        }
+                        byte[] pixels=palette(region,w,h);
+                        if(stride>1)pixels=upscale(pixels,w,h,stride);
+                        paletteNanos+=System.nanoTime()-afterRead;
+                        rgbaBytes+=(long)region.width()*region.height()*4;
                         rendered.put(request.face(),pixels);
                     }
                     // Publish once, including transparent back faces. Never expose a half-rendered cube.
@@ -209,7 +231,7 @@ public final class GpuEngine implements AutoCloseable {
                         frame.completed=new Scene(captured.tick(),rendered);
                         completedScenes.incrementAndGet();
                         frame.renderNanos=System.nanoTime()-start;
-                        lastBatchMillis=frame.renderNanos/1_000_000.0;
+                        lastBatch=new Batch(start-enqueued,frame.renderNanos,ioNanos,paletteNanos,rgbaBytes,culledFaces);
                         frame.rateFrames++;
                         long elapsed=System.nanoTime()-frame.rateAt;
                         if(elapsed>=1_000_000_000L){frame.renderRate=frame.rateFrames*1e9/elapsed;frame.rateAt=System.nanoTime();frame.rateFrames=0;}
@@ -281,28 +303,31 @@ public final class GpuEngine implements AutoCloseable {
         for(Request request:requests)faces.put(request.face(),blank(request.widthPx()*request.heightPx()));
         return new Scene(-1,faces); // Placeholder is not a completed GPU frame.
     }
-    @SuppressWarnings({"deprecation","removal"}) private byte[] palette(byte[] rgba,int count)throws IOException {
-        if(rgba.length!=count*4)throw new IOException("Unexpected GPU framebuffer size: "+rgba.length);
-        byte[] indices=new byte[count];
-        for(int p=0,j=0;p<count;p++,j+=4) {
-            if((rgba[j+3]&255)<128)continue;
-            int rgb=(rgba[j]&255)<<16|(rgba[j+1]&255)<<8|(rgba[j+2]&255);
-            byte index=colors[rgb];
-            if(index==0) {
-                index=MapPalette.matchColor((rgb>>16)&255,(rgb>>8)&255,rgb&255);
-                colors[rgb]=index;
+    @SuppressWarnings({"deprecation","removal"}) private byte[] palette(Region region,int width,int height) {
+        byte[] indices=new byte[width*height];
+        int j=0;
+        for(int row=0;row<region.height();row++) {
+            // GL rows are bottom-first. Place them directly into the top-first map image.
+            int start=(height-1-region.y()-row)*width+region.x();
+            for(int p=start,end=start+region.width();p<end;p++,j+=4) {
+                if((rgba[j+3]&255)<128)continue;
+                int rgb=(rgba[j]&255)<<16|(rgba[j+1]&255)<<8|(rgba[j+2]&255);
+                byte index=colors[rgb];
+                if(index==0) {
+                    index=MapPalette.matchColor((rgb>>16)&255,(rgb>>8)&255,rgb&255);
+                    colors[rgb]=index;
+                }
+                indices[p]=index;
             }
-            indices[p]=index;
         }
         return indices;
     }
     private byte[] blank(int length){return blanks.computeIfAbsent(length,n->new byte[n]);}
-    private byte[] process(String meshPath,Request request,Models.Asset asset,int width,int height)throws IOException {
+    private Region process(byte[] path,int pose,Request request,Models.Asset asset,int width,int height)throws IOException {
         ensureProcess();
-        byte[] path=meshPath.getBytes(StandardCharsets.UTF_8);
         if(path.length>65535)throw new IOException("GPU mesh path too long");
         output.writeInt(path.length);output.write(path);
-        output.writeInt(width);output.writeInt(height);
+        output.writeInt(pose);output.writeInt(width);output.writeInt(height);
         for(double value:new double[]{request.eyeX(),request.eyeY(),request.eyeZ(),request.widthTiles(),request.heightTiles(),
                 request.scale(),request.depth(),asset.midX(),asset.midY(),asset.midZ(),asset.normalization()})output.writeDouble(value);
         CubeGeometry.Face face=request.basis();
@@ -315,10 +340,13 @@ public final class GpuEngine implements AutoCloseable {
             int errorSize=-resultSize;if(errorSize>8192||errorSize<0)throw new IOException("Invalid GPU error size");
             throw new IOException(new String(input.readNBytes(errorSize),StandardCharsets.UTF_8));
         }
-        if(resultSize!=width*height*4)throw new IOException("Bad GPU result size "+resultSize);
-        byte[] result=input.readNBytes(resultSize);
-        if(result.length!=resultSize)throw new EOFException("GPU process stopped before finishing frame");
-        return result;
+        if(resultSize==0)return null;
+        int x=input.readInt(),y=input.readInt(),w=input.readInt(),h=input.readInt();
+        if(x<0||y<0||w<1||h<1||w>width||h>height||x>width-w||y>height-h||resultSize!=4L*w*h)
+            throw new IOException("Invalid GPU readback region");
+        if(rgba.length<resultSize)rgba=new byte[resultSize];
+        input.readFully(rgba,0,resultSize);
+        return new Region(x,y,w,h);
     }
     private void ensureProcess()throws IOException {
         if(process!=null&&process.isAlive())return;
@@ -335,10 +363,17 @@ public final class GpuEngine implements AutoCloseable {
         process=builder.start();
         input=new DataInputStream(new BufferedInputStream(process.getInputStream()));
         output=new DataOutputStream(new BufferedOutputStream(process.getOutputStream()));
-        int size=input.readInt();if(size<5||size>1024)throw new IOException("Bad GPU startup response");
-        String info=new String(input.readNBytes(size),StandardCharsets.UTF_8);
-        if(!info.startsWith("READY "))throw new IOException(info);
-        backendInfo=info;plugin.getLogger().info("HoloMap "+info);
+        try {
+            int size=input.readInt();if(size<5||size>1024)throw new IOException("Bad GPU startup response");
+            String info=new String(input.readNBytes(size),StandardCharsets.UTF_8);
+            if(info.startsWith("ERROR: "))throw new IOException(info);
+            if(!info.startsWith(PROTOCOL+"READY "))throw new IOException("Incompatible GPU helper: "+info);
+            backendInfo=info.substring(PROTOCOL.length());
+            plugin.getLogger().info("HoloMap "+backendInfo);
+        }catch(IOException ex){
+            stopProcess();
+            throw ex;
+        }
     }
     private synchronized void stopProcess() {
         if(process!=null)process.destroyForcibly();process=null;input=null;output=null;

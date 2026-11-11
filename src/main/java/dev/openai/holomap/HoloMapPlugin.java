@@ -219,6 +219,7 @@ public final class HoloMapPlugin extends JavaPlugin implements CommandExecutor, 
             case "status" -> {
                 sender.sendMessage("§bRenderer: §f"+(models.isGpu()?"GPU/OpenGL":"CPU fallback"));
                 sender.sendMessage("§bGPU: §f"+gpu.status());
+                if(models.isGpu()&&nativeMaps!=null)sender.sendMessage("§bNative maps: §f"+nativeMaps.status());
                 for(String name:models.installed()) sender.sendMessage("§7"+name+": "+models.status(name));
             }
             case "list" -> {

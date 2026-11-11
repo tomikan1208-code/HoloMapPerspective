@@ -14,6 +14,8 @@ public final class NativeMaps {
     private final Class<?> packetClass;
     private final Field worldMap,dirtyData;
     private final Method getHandle,getHoldingPlayer;
+    private record DeliveryTiming(long diffNanos,long handoffNanos,int patchCount,long pixelBytes) {}
+    private volatile DeliveryTiming lastDelivery;
     public NativeMaps()throws ReflectiveOperationException {
         Class<?> id=Class.forName("net.minecraft.world.level.saveddata.maps.MapId");
         Class<?> colors=Class.forName("net.minecraft.world.level.saveddata.maps.MapItemSavedData$MapPatch");
@@ -35,6 +37,12 @@ public final class NativeMaps {
         for(MapPatches.Patch value:patches)packets.add(mapPacket.newInstance(mapId.newInstance(value.mapId()),(byte)0,true,
                 null,patch.newInstance(value.x(),value.y(),value.width(),value.height(),value.pixels())));
         return bundle.newInstance(packets);
+    }
+    public String status() {
+        DeliveryTiming timing=lastDelivery;
+        if(timing==null)return "Waiting for first native map update";
+        return String.format(Locale.ROOT,"last update: diff %.1f ms, packet handoff %.1f ms, %d patches, %.1f KiB raw pixels",
+                timing.diffNanos()/1e6,timing.handoffNanos()/1e6,timing.patchCount(),timing.pixelBytes()/1024.0);
     }
     public GpuEngine.Delivery capture(Player player,List<MapPatches.Tile> tiles) {
         try {
@@ -75,10 +83,19 @@ public final class NativeMaps {
             @Override public boolean ready(){return writable.getAsBoolean();}
             @Override public void reset(){reset.set(true);}
             @Override public boolean send(GpuEngine.Scene scene)throws Exception {
+                long started=System.nanoTime();
                 if(reset.getAndSet(false))changes.reset();
                 List<MapPatches.Patch> patches=changes.update(scene.faces());
-                if(patches.isEmpty())return false;
-                receiver.accept(packetBundle(patches));return true;
+                long diffNanos=System.nanoTime()-started;
+                long handoffNanos=0,pixelBytes=0;
+                if(!patches.isEmpty()) {
+                    for(MapPatches.Patch patch:patches)pixelBytes+=patch.pixels().length;
+                    long handoffAt=System.nanoTime();
+                    receiver.accept(packetBundle(patches));
+                    handoffNanos=System.nanoTime()-handoffAt;
+                }
+                lastDelivery=new DeliveryTiming(diffNanos,handoffNanos,patches.size(),pixelBytes);
+                return !patches.isEmpty();
             }
         };
     }

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.3
+
+- Export FBX and Blender animations as textured GPU clips with one shared mesh and compressed poses.
+- Play `model.hanim` clips at their exported sample rate, with up to 3,600 frames by default.
+
 ## 0.7.2
 - Mount inward maps on the interior faces of backing blocks outside the map box.
 - Move the backing of an existing inward cube with `/holomap fill`.

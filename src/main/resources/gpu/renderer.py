@@ -8,8 +8,15 @@ import sys
 import struct
 import platform
 import json
+import math
+import zlib
 from pathlib import Path
 from collections import OrderedDict
+
+PROTOCOL = 'HMAP-IPC3 '
+# Little-endian header, material JSON, vertex attributes, indices, frame table, then zlib poses.
+CLIP_HEADER = struct.Struct('<8siiif6fi')
+CLIP_ENTRY = struct.Struct('<i6H')
 
 
 def log(*parts):
@@ -34,8 +41,75 @@ def send(stream, payload):
     stream.flush()
 
 
+def readback_region(bounds, width, height, args):
+    """Conservatively bound the screen projection of the mesh in GL pixel coordinates."""
+    full = (0, 0, width, height)
+    if bounds is None:
+        return full
+
+    ex, ey, ez, bw, bh, scale, depth, mx, my, mz, norm, *basis = args
+    # Match the float uniforms, including the rounded midpoint of large OBJ coordinates.
+    try:
+        ex, ey, ez, bw, bh, size, depth, mx, my, mz, norm, *basis = struct.unpack(
+            '20f', struct.pack('20f', ex, ey, ez, bw, bh, bh*scale, depth, mx, my, mz, norm, *basis))
+    except OverflowError:
+        return full
+    if bw <= 0 or bh <= 0 or not all(map(math.isfinite, (ex, ey, ez, bw, bh, size, depth, mx, my, mz, norm, *basis))):
+        return full
+
+    # Transform the box to the face's axes. Expand the intervals for shader rounding.
+    limits = []
+    mid = (mx, my, mz)
+    for axis, offset in ((0, 0), (3, 0), (6, depth)):
+        low = high = -offset
+        magnitude = abs(offset)
+        for i in range(3):
+            factor = basis[axis+i]*norm*size
+            a = (bounds[i]-mid[i])*factor
+            b = (bounds[i+3]-mid[i])*factor
+            low += min(a, b)
+            high += max(a, b)
+            magnitude += max(abs(a), abs(b))
+        pad = 1e-6*max(1, magnitude)
+        limits.append((low-pad, high+pad))
+
+    (xmin, xmax), (ymin, ymax), (zmin, zmax) = limits
+    near, far = ez-zmax, ez-zmin
+    if near < .05:
+        # Division is unsafe here, but a whole box can still be outside a clip plane.
+        def outside(low, high, eye, blocks):
+            left = max(far+2*(ez*high-eye*zmin)/blocks, near+2*(ez*high-eye*zmax)/blocks)
+            right = max(far-2*(ez*low-eye*zmin)/blocks, near-2*(ez*low-eye*zmax)/blocks)
+            magnitude = abs(ez)*max(abs(low), abs(high)) + abs(eye)*max(abs(zmin), abs(zmax))
+            pad = 1e-6*(1+max(abs(near), abs(far))+2*magnitude/blocks)
+            return min(left, right) < -pad
+
+        if outside(xmin, xmax, ex, bw) or outside(ymin, ymax, ey, bh):
+            return None
+        return full
+
+    # With a positive divisor, the extrema of the perspective transform are at the corners.
+    def extent(low, high, eye, blocks, pixels):
+        lower = min((ez*low-eye*zmin)/far, (ez*low-eye*zmax)/near)
+        upper = max((ez*high-eye*zmin)/far, (ez*high-eye*zmax)/near)
+        magnitude = abs(ez)*max(abs(low), abs(high)) + abs(eye)*max(abs(zmin), abs(zmax))
+        pad = 2 + pixels*1e-6*magnitude/(blocks*near)
+        start = max(0, math.floor(pixels*(lower/blocks+.5)-pad))
+        end = min(pixels, math.ceil(pixels*(upper/blocks+.5)+pad))
+        return start, end-start
+
+    x, w = extent(xmin, xmax, ex, bw, width)
+    y, h = extent(ymin, ymax, ey, bh, height)
+    if w <= 0 or h <= 0:
+        return None
+    if w*h >= .875*width*height:
+        return full
+    return x, y, w, h
+
+
 VERTEX = '''#version 330
 in vec3 in_pos;
+in uvec3 in_quantized_pos;
 in uint in_rgb;
 in vec2 in_uv;
 in vec3 in_normal;
@@ -52,12 +126,16 @@ uniform vec3 u_normal;
 uniform bool u_vertex_alpha;
 uniform bool u_outline;
 uniform float u_edge_size;
+uniform bool u_packed;
+uniform vec3 u_quantized_base;
+uniform vec3 u_quantized_step;
 out vec4 v_color;
 out vec2 v_uv;
 out vec3 v_world;
 out vec3 v_normal;
 void main() {
-    vec3 world = (in_pos-u_mid)*u_normalization;
+    vec3 position = u_packed ? u_quantized_base + vec3(in_quantized_pos)*u_quantized_step : in_pos;
+    vec3 world = (position-u_mid)*u_normalization;
     if (u_outline) world += in_normal * in_edge * u_edge_size * 0.0025;
     vec3 p = vec3(dot(world,u_right),dot(world,u_up),dot(world,u_normal))*u_size;
     p.z -= u_depth;
@@ -80,6 +158,7 @@ FRAGMENT = '''#version 330
 in vec4 v_color;
 in vec2 v_uv;
 uniform bool u_textured;
+uniform bool u_texture_alpha;
 uniform sampler2D u_texture;
 uniform bool u_pmx;
 uniform bool u_two_sided;
@@ -96,7 +175,9 @@ in vec3 v_world;
 in vec3 v_normal;
 out vec4 out_color;
 void main() {
-    vec4 color = v_color * (u_textured ? texture(u_texture,v_uv) : vec4(1));
+    vec4 texel = u_textured ? texture(u_texture,v_uv) : vec4(1);
+    if (!u_texture_alpha) texel.a = 1.0;
+    vec4 color = v_color * texel;
     if (color.a < (u_blend ? 0.00392 : 0.5)) discard;
     if (u_outline) {
         if (gl_FrontFacing) discard;
@@ -131,6 +212,64 @@ void main() {
 '''
 
 
+class PackedClip:
+    """Read the shared mesh once and keep only the last decoded pose on the GPU."""
+    def __init__(self, path, vertices, bounds, frames):
+        self.path = path
+        self.pose_bytes = vertices*6
+        self.base = bounds[:3]
+        self.step = tuple((high-low)/65535 for low, high in zip(self.base, bounds[3:]))
+        self.frames = frames
+        self.current = -1
+
+    @classmethod
+    def read(cls, path, file):
+        signature, triangles, vertices, count, fps, *tail = CLIP_HEADER.unpack(read_exact(file, CLIP_HEADER.size))
+        bounds, manifest_bytes = tail[:6], tail[6]
+        size = os.fstat(file.fileno()).st_size
+        offset = CLIP_HEADER.size + manifest_bytes + (triangles+vertices)*12 + count*CLIP_ENTRY.size
+        if (signature != b'HMAPANI1' or triangles < 1 or not 0 < vertices <= triangles*3 or count < 1
+                or not math.isfinite(fps) or fps <= 0 or not 0 < manifest_bytes <= 1_048_576
+                or offset+count > size or not all(map(math.isfinite, bounds))
+                or any(low > high for low, high in zip(bounds[:3], bounds[3:]))):
+            raise ValueError('Invalid packed animation: '+path)
+        manifest = json.loads(read_exact(file, manifest_bytes).decode('utf-8'))
+        attributes = read_exact(file, vertices*12)
+        indices = read_exact(file, triangles*12)
+        if max(memoryview(indices).cast('I')) >= vertices:
+            raise ValueError('Packed animation index outside vertex data: '+path)
+        frames = []
+        for packed_bytes, *box in CLIP_ENTRY.iter_unpack(read_exact(file, count*CLIP_ENTRY.size)):
+            if (not 0 < packed_bytes <= vertices*12+64 or offset+packed_bytes > size
+                    or any(low > high for low, high in zip(box[:3], box[3:]))):
+                raise ValueError('Invalid packed animation frame table: '+path)
+            frames.append((offset, packed_bytes, box))
+            offset += packed_bytes
+        if offset != size:
+            raise ValueError('Invalid packed animation length: '+path)
+        return cls(path, vertices, bounds, frames), triangles, manifest, attributes, indices
+
+    def bounds_at(self, pose):
+        if not 0 <= pose < len(self.frames):
+            raise ValueError('Packed animation pose out of range')
+        box = self.frames[pose][2]
+        return tuple(self.base[i%3]+value*self.step[i%3] for i, value in enumerate(box))
+
+    def upload(self, vbo, pose):
+        if self.current == pose:
+            return
+        offset, packed_bytes, _ = self.frames[pose]
+        with open(self.path, 'rb') as file:
+            file.seek(offset)
+            packed = read_exact(file, packed_bytes)
+        decoder = zlib.decompressobj()
+        raw = decoder.decompress(packed, self.pose_bytes+1)
+        if len(raw) != self.pose_bytes or not decoder.eof or decoder.unused_data:
+            raise ValueError('Invalid compressed pose: '+self.path)
+        vbo.write(raw)
+        self.current = pose
+
+
 class GpuRenderer:
     def __init__(self):
         import moderngl
@@ -148,6 +287,7 @@ class GpuRenderer:
         self.name='READY '+vendor+' / '+gpu
         self.program=self.ctx.program(vertex_shader=VERTEX,fragment_shader=FRAGMENT)
         self.meshes=OrderedDict()
+        self.clips={}
         self.materials={}
         self.mesh_textures={}
         self.textures={}
@@ -158,10 +298,12 @@ class GpuRenderer:
         self.ctx.enable_only(moderngl.DEPTH_TEST)
         self.ctx.depth_func='<'
 
-    def mesh(self, path):
+    def mesh(self, path, pose=-1):
         if path in self.meshes:
             self.meshes.move_to_end(path)
             return self.meshes[path]
+        if pose >= 0:
+            return self.load_clip(path)
         with open(path, 'rb') as file:
             header=read_exact(file,36)
             signature=header[:8]
@@ -172,6 +314,9 @@ class GpuRenderer:
             triangles,=struct.unpack_from('<i',header,8)
             if triangles<1:
                 raise ValueError('Empty mesh cache: '+path)
+            bounds=struct.unpack_from('<6f',header,12)
+            if not all(map(math.isfinite,bounds)) or any(bounds[i]>bounds[i+3] for i in range(3)):
+                bounds=None
             # Transfer the compact binary mesh to GPU in bounded chunks (no large Python bytes object).
             byte_count=triangles*(120 if pmx else 72 if textured else 48)
             if os.fstat(file.fileno()).st_size!=36+byte_count:
@@ -192,31 +337,89 @@ class GpuRenderer:
         else:
             content=(vbo,'3f 1u','in_pos','in_rgb')
         vao=self.ctx.vertex_array(self.program,[content])
+        return self.cache_mesh(path,vbo,vao,triangles,textured,pmx,bounds)
+
+    def load_clip(self, path):
+        with open(path, 'rb') as file:
+            clip,triangles,manifest,attributes,indices=PackedClip.read(path,file)
+        buffers=[]
+        try:
+            positions=self.ctx.buffer(reserve=clip.pose_bytes,dynamic=True)
+            buffers.append(positions)
+            buffers.append(self.ctx.buffer(attributes))
+            buffers.append(self.ctx.buffer(indices))
+            _,static,ibo=buffers
+            vao=self.ctx.vertex_array(self.program,[
+                (positions,'3u2','in_quantized_pos'),
+                (static,'1u 2f','in_rgb','in_uv'),
+            ],index_buffer=ibo)
+        except Exception:
+            for buffer in buffers:
+                buffer.release()
+            raise
+        self.clips[path]=(clip,static,ibo)
+        try:
+            return self.cache_mesh(path,positions,vao,triangles,True,False,None,manifest)
+        except Exception:
+            self.clips.pop(path)
+            static.release();ibo.release()
+            raise
+
+    def cache_mesh(self,path,vbo,vao,triangles,textured,pmx,bounds,manifest=None):
+        try:
+            if textured:
+                if manifest is None:
+                    manifest=json.loads(Path(path+'.materials.json').read_text(encoding='utf-8'))
+                segments,textures=self.load_materials(path,manifest,triangles,pmx)
+            else:
+                segments,textures=[{'first':0,'count':triangles*3}],set()
+        except Exception:
+            vao.release();vbo.release()
+            raise
+        # HMAPTEX2 stores surface bounds. An outline can extend beyond them.
+        if pmx and any(s.get('edge_size',0)>0 and not s.get('blend') for s in segments):
+            bounds=None
+        self.materials[path]=(textured,pmx,segments,bounds)
+        self.mesh_textures[path]=textures
+        self.meshes[path]=(vbo,vao,triangles)
+        while len(self.meshes)>8:
+            old_path,(old_vbo,old_vao,_)=self.meshes.popitem(last=False)
+            old_vao.release();old_vbo.release()
+            self.materials.pop(old_path)
+            self.release_textures(self.mesh_textures.pop(old_path))
+            old_clip=self.clips.pop(old_path,None)
+            if old_clip is not None:
+                old_clip[1].release();old_clip[2].release()
+        return vbo,vao,triangles
+
+    def load_materials(self,path,manifest,triangles,pmx):
         segments=[]
         textures=set()
-        if textured:
-            metadata=Path(path+'.materials.json')
-            manifest=json.loads(metadata.read_text(encoding='utf-8'))
-            expected=0
-            for segment in manifest['segments']:
-                if segment['first']!=expected or segment['count']<0:
-                    raise ValueError('Invalid textured mesh draw range')
-                for role in ('texture','toon','sphere'):
-                    if not segment.get(role):
-                        continue
-                    texture=(Path(path).parent/segment[role]).resolve()
-                    if not texture.is_relative_to(Path(path).parent.resolve()):
-                        raise ValueError('Texture must be inside the model directory')
-                    textures.add(str(texture))
-                    segment[role]=str(texture)
-                # Adjacent materials with identical shader inputs share one draw.
-                if pmx and segments and all(segments[-1].get(key)==segment.get(key) for key in
-                        ('texture','toon','sphere','sphere_mode','two_sided','blend','edge_color','edge_size')):
-                    segments[-1]['count']+=segment['count']
-                else:
-                    segments.append(segment)
-                expected+=segment['count']
-            if expected!=triangles*3:raise ValueError('Texture ranges do not cover mesh')
+        expected=0
+        directory=Path(path).resolve().parent
+        for segment in manifest['segments']:
+            if (segment['first']!=expected or type(segment['count']) is not int
+                    or segment['count']<0 or segment['count']%3):
+                raise ValueError('Invalid textured mesh draw range')
+            for role in ('texture','toon','sphere'):
+                if not segment.get(role):
+                    continue
+                texture=(directory/segment[role]).resolve()
+                if not texture.is_relative_to(directory):
+                    raise ValueError('Texture must be inside the model directory')
+                textures.add(str(texture))
+                segment[role]=str(texture)
+            # Adjacent PMX materials with identical shader inputs share one draw.
+            if pmx and segments and all(segments[-1].get(key)==segment.get(key) for key in
+                    ('texture','toon','sphere','sphere_mode','two_sided','blend','edge_color','edge_size')):
+                segments[-1]['count']+=segment['count']
+            else:
+                segments.append(segment)
+            expected+=segment['count']
+        if expected!=triangles*3:
+            raise ValueError('Texture ranges do not cover mesh')
+        acquired=[]
+        try:
             for texture_path in textures:
                 if texture_path not in self.textures:
                     from PIL import Image
@@ -227,20 +430,17 @@ class GpuRenderer:
                         texture.filter=(self.moderngl.LINEAR_MIPMAP_LINEAR,self.moderngl.LINEAR)
                     self.textures[texture_path]=[texture,0]
                 self.textures[texture_path][1]+=1
-        else:segments=[{'first':0,'count':triangles*3}]
-        self.materials[path]=(textured,pmx,segments)
-        self.mesh_textures[path]=textures
-        self.meshes[path]=(vbo,vao,triangles)
-        # Keep several displays plus their next animation frames resident together.
-        while len(self.meshes)>8:
-            old_path,(old_vbo,old_vao,_)=self.meshes.popitem(last=False)
-            old_vao.release();old_vbo.release()
-            self.materials.pop(old_path,None)
-            for texture_path in self.mesh_textures.pop(old_path,set()):
-                self.textures[texture_path][1]-=1
-                if self.textures[texture_path][1]==0:
-                    self.textures.pop(texture_path)[0].release()
-        return vbo,vao,triangles
+                acquired.append(texture_path)
+        except Exception:
+            self.release_textures(acquired)
+            raise
+        return segments,textures
+
+    def release_textures(self,paths):
+        for texture_path in paths:
+            self.textures[texture_path][1]-=1
+            if self.textures[texture_path][1]==0:
+                self.textures.pop(texture_path)[0].release()
 
     def framebuffer(self,width,height):
         key=(width,height)
@@ -257,13 +457,36 @@ class GpuRenderer:
                 else:break
         return self.targets[key][2]
 
-    def render(self, path,width,height,args):
+    def render(self, path,width,height,args,pose=-1):
+        """Full top-first RGBA image for the offline preview and geometry tools."""
+        region, rgba=self.render_region(path,width,height,args,crop=False,pose=pose)
+        if region is None:
+            return bytes(width*height*4)
+        stride=width*4
+        return b''.join(rgba[row*stride:(row+1)*stride] for row in range(height-1,-1,-1))
+
+    def render_region(self, path,width,height,args,crop=True,pose=-1):
         if width<1 or height<1 or width*height>8_000_000:
             raise ValueError('Invalid map render size')
-        _,vao,count=self.mesh(path)
         ex,ey,ez,bw,bh,scale,depth,mx,my,mz,norm,*basis=args
         if ez<=1e-4:
-            return bytes(width*height*4)
+            return None,b''
+        vbo,vao,_=self.mesh(path,pose)
+        textured,pmx,segments,bounds=self.materials[path]
+        clip_entry=self.clips.get(path)
+        if (pose>=0)!=(clip_entry is not None):
+            raise ValueError('Render request does not match mesh type')
+        if clip_entry is not None:
+            clip=clip_entry[0]
+            bounds=clip.bounds_at(pose)
+        region=readback_region(bounds,width,height,args) if crop else (0,0,width,height)
+        if region is None:
+            return None,b''
+        self.program['u_packed'].value=clip_entry is not None
+        if clip_entry is not None:
+            clip.upload(vbo,pose)
+            self.program['u_quantized_base'].value=clip.base
+            self.program['u_quantized_step'].value=clip.step
         uniforms={
             'u_mid':(mx,my,mz),
             'u_normalization':norm,
@@ -280,7 +503,6 @@ class GpuRenderer:
         fbo.use()
         self.ctx.viewport=(0,0,width,height)
         fbo.clear(0,0,0,0,depth=1.0)
-        textured,pmx,segments=self.materials[path]
         self.program['u_vertex_alpha'].value=textured
         self.program['u_pmx'].value=pmx
         self.program['u_outline'].value=False
@@ -291,15 +513,14 @@ class GpuRenderer:
             for segment in segments:
                 self.bind_image(segment, 'texture', 0, 'u_textured')
                 vao.render(self.moderngl.TRIANGLES,vertices=segment['count'],first=segment['first'])
-        rgba=fbo.read(components=4,alignment=1)
-        # OpenGL returns bottom-first pixels; map canvases are top-first.
-        stride=width*4
-        return b''.join(rgba[row*stride:(row+1)*stride] for row in range(height-1,-1,-1))
+        return region,fbo.read(viewport=region,components=4,alignment=1)
 
     def bind_image(self, segment, role, slot, uniform):
         path=segment.get(role)
         if uniform:
             self.program[uniform].value=bool(path)
+        if role=='texture':
+            self.program['u_texture_alpha'].value=segment.get('texture_alpha',True)
         if path:
             self.textures[path][0].use(location=slot)
 
@@ -360,7 +581,7 @@ class GpuRenderer:
 def main():
     try:
         gpu=GpuRenderer()
-        send(sys.stdout.buffer,gpu.name.encode('utf-8'))
+        send(sys.stdout.buffer,(PROTOCOL+gpu.name).encode('utf-8'))
     except Exception as exc:
         log('GPU initialization failed:',repr(exc))
         send(sys.stdout.buffer,('ERROR: '+str(exc)).encode('utf-8'))
@@ -375,15 +596,21 @@ def main():
             path_len,=struct.unpack('>i',header)
             if not (1<=path_len<=65535):raise ValueError('bad path length')
             path=read_exact(incoming,path_len).decode('utf-8')
-            width,height=struct.unpack('>ii',read_exact(incoming,8))
+            pose,width,height=struct.unpack('>iii',read_exact(incoming,12))
             args=struct.unpack('>20d',read_exact(incoming,20*8))
-            response=gpu.render(path,width,height,args)
-            send(outgoing,response)
+            region,rgba=gpu.render_region(path,width,height,args,pose=pose)
+            if region is None:
+                outgoing.write(struct.pack('>i',0))
+            else:
+                # A nonempty response carries its bottom-left origin and bottom-first pixels.
+                outgoing.write(struct.pack('>5i',len(rgba),*region))
+                outgoing.write(rgba)
+            outgoing.flush()
         except EOFError:
             return 0
         except Exception as exc:
             log('GPU render failed:',repr(exc))
-            error=str(exc).encode('utf-8')[:8192]
+            error=(str(exc) or type(exc).__name__).encode('utf-8')[:8192]
             outgoing.write(struct.pack('>i',-len(error)));outgoing.write(error);outgoing.flush()
 
 
